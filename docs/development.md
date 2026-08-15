@@ -30,6 +30,26 @@
 - 不要降低 `MaxPayload`、endpoint MTU 或速率上限之间的边界检查；超长包
   必须丢弃并计数，绝不能静默截断。
 
+## 版本与发布
+
+- 根目录 `VERSION` 是唯一的发布版本来源。初始版本为 `0.0.1a`；本地
+  `make build`、交叉编译和 release artifact 都必须从该文件读取版本，不要在
+  命令、脚本或源码中维护第二份版本号。
+- 版本格式固定为 `MAJOR.MINOR.PATCHa`，其中 `MINOR` 和 `PATCH` 各为一位
+  十进制数。每次准备一个新版本必须执行 `./scripts/bump-version.sh`，其顺序为
+  `0.0.1a -> 0.0.2a -> ... -> 0.0.9a -> 0.1.0a`；继续进位时
+  `0.9.9a -> 1.0.0a`。不得重用、回退或修改已经发布的版本。
+- 发布前将 `VERSION` 的变更与功能变更一同提交，执行 `make test`、`make vet`
+  和 `go test -race ./...`。涉及协议、carrier、NAT、raw socket 或 relay 时，
+  还必须完成相应的隔离联调。
+- 使用 `make release` 生成 Linux `amd64`、`arm64`、`armv7` 静态二进制包、
+  source tarball 和 `SHA256SUMS`。产物写入 `dist/v<VERSION>/`，目录已存在时
+  构建必须失败，避免覆盖已经校验或发布的 artifact。release 构建只允许在
+  已提交且干净的 Git 工作区执行，确保二进制与 source tarball 来自同一提交。
+- 校验 `SHA256SUMS`、`punt --version` 与 `VERSION` 一致后，创建并推送同名
+  Git tag `v<VERSION>`，再上传 release artifact。未经校验的本地 `bin/` 或
+  `dist/` 文件不得提交。
+
 ## 安全与健壮性
 
 - 将 raw ICMP、UDP 控制/数据面和 loopback UDP 都视为不可信输入。每次读取后先

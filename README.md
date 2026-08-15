@@ -140,6 +140,23 @@ make build
 make linux-amd64
 ```
 
+## 发布构建
+
+当前初始发布版本为 `0.0.1a`，根目录 [VERSION](VERSION) 是唯一版本来源。
+每次发布前运行 `./scripts/bump-version.sh`，它会按
+`0.0.1a -> ... -> 0.0.9a -> 0.1.0a` 自动提升版本；然后执行：
+
+```sh
+make test vet
+go test -race ./...
+make release
+```
+
+`make release` 生成 Linux `amd64`、`arm64`、`armv7` 的静态发布包、source
+tarball 和 `SHA256SUMS`，输出在 `dist/v<VERSION>/`。release 只能从已提交且
+干净的 Git 工作区构建。发布规范见
+[开发规范](docs/development.md#版本与发布)。
+
 默认数据载体为双向 ICMP，上限为 10,000 PPS、100 Mbit/s，最大认证数据
 payload 为 1,400 字节。运营商限制某一方向的 ICMP 时，可只把该方向设为
 UDP，例如 `-client-tx udp -server-tx icmp`。高频 Type 3 流量可被观察、
