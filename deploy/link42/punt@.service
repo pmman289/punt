@@ -1,0 +1,24 @@
+[Unit]
+Description=Punt middleware instance %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=link42-punt
+Group=link42-punt
+RuntimeDirectory=link42-punt
+RuntimeDirectoryMode=0750
+ExecStart=/usr/local/sbin/punt --config /etc/link42/middleware/punt/%i.json
+Restart=on-failure
+RestartSec=3
+CapabilityBoundingSet=CAP_NET_RAW
+AmbientCapabilities=CAP_NET_RAW
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/link42/middleware/punt
+
+[Install]
+WantedBy=multi-user.target

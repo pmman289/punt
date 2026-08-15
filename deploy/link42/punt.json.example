@@ -1,0 +1,18 @@
+{
+  "mode": "client",
+  "network": "192.0.2.2:42487",
+  "peer": "198.51.100.9:23086",
+  "local": "127.0.0.1:51821",
+  "wireguard": "127.0.0.1:51820",
+  "key_file": "/etc/link42/middleware/punt/example.key",
+  "status_socket": "/run/link42-punt/example.sock",
+  "keepalive": "5s",
+  "dead_timeout": "15s",
+  "max_payload": 1400,
+  "max_pps": 10000,
+  "max_mbps": 100,
+  "carrier": {
+    "client_to_server": "icmp",
+    "server_to_client": "icmp"
+  }
+}
