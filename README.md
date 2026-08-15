@@ -7,6 +7,28 @@ Unreachable / Port Unreachable（IPv4 Type 3、Code 3）的 quoted UDP payload�
 或放入同一条真实 UDP flow。目标端只会转发到本地配置的单个地址和端口，
 因此 Punt 不是开放代理。
 
+## 为什么不是普通 ICMP 隧道
+
+Punt 面向一类传统 ICMP 隧道难以正常建立双向通信的网络：server 只有经过
+EIP/DNAT 暴露的 UDP 入口，本机网卡并不持有公网地址；client 又位于 CGNAT
+之后，公网 IP 和来源端口由运营商动态映射。仅发送 ICMP Echo 或自定义裸 ICMP
+的隧道没有一条真实传输流用于打洞和维持 conntrack，也无法让 server 可靠学习
+client 的实际 NAT 后地址与端口。中间 NAT 因而可能无法关联、反向转换外层
+ICMP 与其 quoted tuple，表现为单向可达、回包丢失或完全无法建链。
+
+Punt 不直接从裸 ICMP 开始。client 先通过真实 UDP `HELLO` 访问 server，建立
+NAT/conntrack 状态；server 从收到的 UDP 包学习 client 的实际公网 tuple，再
+按该控制流的正反 tuple 构造 ICMP Port Unreachable。对支持 RELATED ICMP 的
+NAT，这些 ICMP 包可以沿已建立的 UDP 映射被正确转换和送达。Punt 继续发送
+UDP keepalive，在 NAT remap 后重新学习 tuple，并用认证 probe 确认双向 carrier
+确实可用后才转发应用流量。
+
+这使 Punt 区别于一般的“IP over ICMP”：它是由真实 UDP 控制面驱动的 NAT
+打洞与四层定向转发器。若运营商只限制某一个 ICMP 方向，还可以将该方向切换
+为认证 UDP，另一方向继续使用 ICMP，无需交换 client/server 角色。Punt 仍
+依赖 NAT 对 RELATED ICMP 的支持，因此不是对所有 NAT 类型都有效的通用穿透
+协议。
+
 UDP relay 保持 datagram 语义；TCP relay 使用 KCP 子会话处理 carrier 路径上
 的丢包、乱序和重传。Punt 的 HMAC 用于隧道认证而不是内容加密；需要内容保密
 时仍应使用 TLS、SSH、WireGuard 等上层协议。
