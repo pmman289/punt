@@ -98,18 +98,14 @@ make test vet build
 sudo setcap cap_net_raw=ep bin/punt
 ```
 
-服务端和客户端的完整配置示例见 [部署指南](docs/deployment.md)。例如，以下
-为通用 TCP relay 的 listener side；应用连接 `127.0.0.1:8080`，而不是公网
-`peer`：
+三种完整的两端配置可直接参照[快速上手](docs/quickstart.md)：
 
-```sh
-punt -mode client -network 192.0.2.10:42487 -peer 198.51.100.9:23086 \
-  -relay tcp -listen 127.0.0.1:8080 -key <32-hex-key>
-```
+- [普通 TCP relay](docs/quickstart.md#普通-tcp-relay)
+- [普通 UDP relay](docs/quickstart.md#普通-udp-relay)
+- [WireGuard 兼容模式](docs/quickstart.md#wireguard-兼容模式)
 
-服务端使用相同密钥，并配置 `-relay tcp -target 127.0.0.1:80`。应用只访问
-`127.0.0.1:8080`；`network`、`peer` 和真实 UDP control port 只属于 Punt
-underlay，不暴露给应用。
+应用只访问本地 `listen` 或本机 WireGuard endpoint；`network`、`peer` 和真实
+UDP control port 只属于 Punt underlay，不暴露给应用。
 
 反向应用流量不应交换 Punt 的 NAT 角色。两端同时增加
 `-listen-side server`，然后由 server 配置 `-listen`、client 配置 `-target`。
@@ -127,6 +123,7 @@ underlay，不暴露给应用。
 
 - [架构与会话状态机](docs/architecture.md)
 - [部署前概念与流量路径](docs/architecture.md#端到端处理路径)
+- [TCP、UDP 与 WireGuard 快速上手](docs/quickstart.md)
 - [协议与报文校验](docs/protocol.md)
 - [部署指南](docs/deployment.md)
 - [Link42 集成契约](docs/link42-integration.md)
@@ -154,3 +151,6 @@ UDP，例如 `-client-tx udp -server-tx icmp`。高频 Type 3 流量可被观察
 WireGuard 传输。详细测试条件、吞吐和限制见
 [测试规范与已验证结果](docs/testing.md)。测试所创建的临时接口、密钥、
 进程和远端二进制均已清理。
+
+## 致谢
+- 感谢[Session Hu](https://github.com/SessionHu)提供的在 NAT 环境下基于 ICMP Port Unreachable 穿透的思路，以及免费提供的token用于vibe coding

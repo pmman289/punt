@@ -74,6 +74,9 @@ punt status -socket /run/link42-punt/<link-instance>.sock
 
 ## 通用 UDP/TCP Relay
 
+完整的 TCP、UDP 和 WireGuard 两端命令见[快速上手](quickstart.md)。本节说明
+参数关系与部署约束。
+
 应用只连接客户端 Punt 的 `listen` 地址。公网 control port 是 Punt underlay，
 不需要也不应该出现在应用配置中。以下示例把客户端本机 `127.0.0.1:8080`
 转发到服务端本机应用 `127.0.0.1:80`。
@@ -86,7 +89,7 @@ punt \
   -network 192.0.2.10:23087 \
   -relay tcp \
   -target 127.0.0.1:80 \
-  -key <32-hex-character-key>
+  -key-file /etc/punt/example.key
 ```
 
 客户端：
@@ -98,7 +101,7 @@ punt \
   -peer 198.51.100.10:23087 \
   -relay tcp \
   -listen 127.0.0.1:8080 \
-  -key <32-hex-character-key>
+  -key-file /etc/punt/example.key
 ```
 
 将两端的 `tcp` 同时改为 `udp` 即为逐 datagram UDP relay。TCP/UDP 不能在同一
@@ -175,10 +178,12 @@ UDP carrier 复用真实 control socket 和 NAT mapping，但数据仍由 Punt s
 WireGuard peer endpoint 配置为 `127.0.0.1:51821`，不要配置公网 peer。
 
 ```sh
-wg set wg-punt peer <remote-public-key> \
+REMOTE_WG_PUBLIC_KEY='replace-with-remote-public-key'
+REMOTE_TUNNEL_PREFIX='replace-with-remote-tunnel-prefix'
+wg set wg-punt peer "$REMOTE_WG_PUBLIC_KEY" \
   endpoint 127.0.0.1:51821 \
   persistent-keepalive 25 \
-  allowed-ips <remote-tunnel-prefix>
+  allowed-ips "$REMOTE_TUNNEL_PREFIX"
 ip link set dev wg-punt mtu 1340 up
 ```
 
@@ -195,7 +200,7 @@ punt \
   -network 192.0.2.10:23087 \
   -local 127.0.0.1:51821 \
   -wireguard 127.0.0.1:51820 \
-  -key <32-hex-character-key>
+  -key-file /etc/punt/example.key
 ```
 
 客户端绑定希望保持稳定的本地 UDP 源端口，并将 peer 设为服务端公网地址：
@@ -207,7 +212,7 @@ punt \
   -peer 198.51.100.10:23087 \
   -local 127.0.0.1:51821 \
   -wireguard 127.0.0.1:51820 \
-  -key <32-hex-character-key>
+  -key-file /etc/punt/example.key
 ```
 
 服务端日志中的 `learned UDP NAT tuple` 才是它实际用于 ICMP 外层和 quoted
