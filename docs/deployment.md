@@ -224,14 +224,25 @@ UDP 的客户端地址/端口。不要把客户端本地端口或预期公网映
 | --- | ---: | --- |
 | `-keepalive` | `5s` | 真实 UDP HELLO 周期，不宜超过已测 NAT timeout |
 | `-dead-timeout` | `15s` | UDP ACK/HELLO 超时后重建 session |
+| `-tcp-fallback` | `3s` | UDP control 尚未建连时回落 TCP control 的等待时间；`0` 禁用 |
 | `-max-payload` | `1400` | 最大认证数据 payload；relay 另占 16 字节帧头 |
 | `-client-tx` | `icmp` | client -> server carrier，`icmp` 或 `udp` |
 | `-server-tx` | `icmp` | server -> client carrier，`icmp` 或 `udp` |
 | `-max-pps` | `10000` | 当前发送方向数据 carrier PPS 上限 |
 | `-max-mbps` | `100` | 当前发送方向数据 carrier 速率上限 |
+| `-icmp-pacing-pps` | `0` | WireGuard 经本机 ICMP 发送方向的可选节奏目标；`0` 保持直发 |
 
 先从低速率开始。若运营商对 ICMP 限速或丢包，应下调应用发送速率并观察
-`dropped`、WireGuard transfer 和端到端丢包，不要仅提高速率上限。
+`dropped`、WireGuard transfer 和端到端丢包，不要仅提高速率上限。对于
+WireGuard 下行突发导致高重传的路径，可仅在发送端设置
+`-icmp-pacing-pps`，其值必须不高于 `-max-pps`；建议从 `8000` 开始逐步测量。
+该选项只影响本机发出的 ICMP WireGuard 数据，控制和探测报文仍立即发送。
+
+TCP 回落只替代 control HELLO/ACK，不传输 WireGuard 数据。客户端会继续从
+`network` 指定的 UDP 端口向服务端发送 HELLO，以维持 NAT 映射；TCP 也从这个
+端口建立连接，服务端据此构造 ICMP quoted UDP tuple。因此它适用于服务端 UDP
+入站被阻断、但 TCP 可达且 NAT 保持端口的场景。若 NAT 重映射 UDP 端口，Punt 不会
+错误建立会话，应改为开放 UDP control 端口。
 
 ## 运行检查与故障处理
 

@@ -21,6 +21,11 @@ func openRawSocket() (*rawSocket, error) {
 		_ = syscall.Close(fd)
 		return nil, err
 	}
+	// Linux doubles this value and caps it by the host policy. Requesting a
+	// larger buffer lets a paced receiver absorb brief scheduling delays without
+	// requiring a global sysctl change.
+	_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, 4*1024*1024)
+	_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF, 4*1024*1024)
 	return &rawSocket{fd: fd}, nil
 }
 

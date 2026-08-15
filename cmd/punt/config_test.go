@@ -35,8 +35,48 @@ func TestLoadManagedConfig(t *testing.T) {
 	if cfg.Mode != "client" || cfg.Network.String() != "192.0.2.2:42487" || cfg.Peer == nil || cfg.Peer.String() != "198.51.100.9:23086" {
 		t.Fatalf("unexpected network config: %#v", cfg)
 	}
-	if cfg.Local.String() != "127.0.0.1:51821" || cfg.WireGuard.String() != "127.0.0.1:51820" || cfg.MaxPPS != 10000 || cfg.MaxMegabits != 100 || cfg.ClientTX != tunnel.CarrierICMP || cfg.ServerTX != tunnel.CarrierICMP {
+	if cfg.Local.String() != "127.0.0.1:51821" || cfg.WireGuard.String() != "127.0.0.1:51820" || cfg.MaxPPS != 10000 || cfg.MaxMegabits != 100 || cfg.TCPFallback != 3*time.Second || cfg.ICMPPacingPPS != 0 || cfg.ClientTX != tunnel.CarrierICMP || cfg.ServerTX != tunnel.CarrierICMP {
 		t.Fatalf("managed defaults not applied: %#v", cfg)
+	}
+}
+
+func TestLoadManagedICMPPacingConfig(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "key")
+	if err := os.WriteFile(keyPath, []byte(managedTestKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "punt.json")
+	config := `{"mode":"server","network":"192.0.2.2:23086","key_file":"` + keyPath + `","max_pps":10000,"icmp_pacing_pps":9000}`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadManagedConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ICMPPacingPPS != 9000 {
+		t.Fatalf("ICMP pacing PPS = %d, want 9000", cfg.ICMPPacingPPS)
+	}
+}
+
+func TestLoadManagedTCPFallbackConfig(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "key")
+	if err := os.WriteFile(keyPath, []byte(managedTestKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "punt.json")
+	config := `{"mode":"server","network":"192.0.2.2:23086","key_file":"` + keyPath + `","tcp_fallback":"0s"}`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadManagedConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TCPFallback != 0 {
+		t.Fatalf("TCP fallback = %s, want disabled", cfg.TCPFallback)
 	}
 }
 

@@ -50,6 +50,25 @@ func TestConfigUsesRawSocketOnlyForICMP(t *testing.T) {
 	}
 }
 
+func TestWireGuardICMPPacingIsDirectionalAndBounded(t *testing.T) {
+	e := &engine{cfg: Config{Mode: Server, ServerTX: CarrierICMP, MaxPPS: 10_000, ICMPPacingPPS: 8_000}}
+	if !e.pacesWireGuardICMP() {
+		t.Fatal("server ICMP WireGuard direction was not paced")
+	}
+
+	for i := 0; i < maxPacedWireGuardQueue+1; i++ {
+		e.enqueueRaw([]byte{byte(i)}, Tuple{})
+	}
+	if len(e.rawQueue) != maxPacedWireGuardQueue || e.stats.dropped != 1 {
+		t.Fatalf("paced queue=%d dropped=%d", len(e.rawQueue), e.stats.dropped)
+	}
+
+	udp := &engine{cfg: Config{Mode: Server, ServerTX: CarrierUDP, MaxPPS: 10_000, ICMPPacingPPS: 8_000}}
+	if udp.pacesWireGuardICMP() {
+		t.Fatal("UDP WireGuard direction unexpectedly enabled ICMP pacing")
+	}
+}
+
 func TestUDPDataValidatesSourceSessionAndDelivers(t *testing.T) {
 	remote, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
 	if err != nil {

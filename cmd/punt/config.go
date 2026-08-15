@@ -16,46 +16,50 @@ import (
 )
 
 type cliConfig struct {
-	configPath   string
-	mode         string
-	network      string
-	peer         string
-	local        string
-	wireGuard    string
-	keyHex       string
-	keyFile      string
-	statusSocket string
-	keepalive    time.Duration
-	deadTimeout  time.Duration
-	maxPayload   int
-	maxPPS       int
-	maxMegabits  int
-	clientTX     string
-	serverTX     string
-	relay        string
-	listenSide   string
-	listen       string
-	target       string
-	relayIdle    time.Duration
-	tcpNoCwnd    bool
+	configPath    string
+	mode          string
+	network       string
+	peer          string
+	local         string
+	wireGuard     string
+	keyHex        string
+	keyFile       string
+	statusSocket  string
+	keepalive     time.Duration
+	deadTimeout   time.Duration
+	tcpFallback   time.Duration
+	maxPayload    int
+	maxPPS        int
+	maxMegabits   int
+	icmpPacingPPS int
+	clientTX      string
+	serverTX      string
+	relay         string
+	listenSide    string
+	listen        string
+	target        string
+	relayIdle     time.Duration
+	tcpNoCwnd     bool
 }
 
 // managedConfig is the stable file contract consumed by Link42-managed units.
 type managedConfig struct {
-	Mode         string               `json:"mode"`
-	Network      string               `json:"network"`
-	Peer         string               `json:"peer,omitempty"`
-	Local        string               `json:"local,omitempty"`
-	WireGuard    string               `json:"wireguard,omitempty"`
-	KeyFile      string               `json:"key_file"`
-	StatusSocket string               `json:"status_socket,omitempty"`
-	Keepalive    string               `json:"keepalive,omitempty"`
-	DeadTimeout  string               `json:"dead_timeout,omitempty"`
-	MaxPayload   int                  `json:"max_payload,omitempty"`
-	MaxPPS       int                  `json:"max_pps,omitempty"`
-	MaxMegabits  int                  `json:"max_mbps,omitempty"`
-	Carrier      managedCarrierConfig `json:"carrier,omitempty"`
-	Relay        *managedRelayConfig  `json:"relay,omitempty"`
+	Mode          string               `json:"mode"`
+	Network       string               `json:"network"`
+	Peer          string               `json:"peer,omitempty"`
+	Local         string               `json:"local,omitempty"`
+	WireGuard     string               `json:"wireguard,omitempty"`
+	KeyFile       string               `json:"key_file"`
+	StatusSocket  string               `json:"status_socket,omitempty"`
+	Keepalive     string               `json:"keepalive,omitempty"`
+	DeadTimeout   string               `json:"dead_timeout,omitempty"`
+	TCPFallback   string               `json:"tcp_fallback,omitempty"`
+	MaxPayload    int                  `json:"max_payload,omitempty"`
+	MaxPPS        int                  `json:"max_pps,omitempty"`
+	MaxMegabits   int                  `json:"max_mbps,omitempty"`
+	ICMPPacingPPS int                  `json:"icmp_pacing_pps,omitempty"`
+	Carrier       managedCarrierConfig `json:"carrier,omitempty"`
+	Relay         *managedRelayConfig  `json:"relay,omitempty"`
 }
 
 type managedCarrierConfig struct {
@@ -86,7 +90,7 @@ func (c cliConfig) tunnelConfig() (tunnel.Config, error) {
 	}
 	return buildTunnelConfig(
 		c.mode, c.network, c.peer, c.local, c.wireGuard, c.statusSocket,
-		c.clientTX, c.serverTX, key, c.keepalive, c.deadTimeout, c.maxPayload, c.maxPPS, c.maxMegabits, relay,
+		c.clientTX, c.serverTX, key, c.keepalive, c.deadTimeout, c.tcpFallback, c.maxPayload, c.maxPPS, c.maxMegabits, c.icmpPacingPPS, relay,
 	)
 }
 
@@ -115,6 +119,10 @@ func loadManagedConfig(path string) (tunnel.Config, error) {
 		return tunnel.Config{}, err
 	}
 	deadTimeout, err := durationOrDefault(raw.DeadTimeout, 15*time.Second, "dead_timeout")
+	if err != nil {
+		return tunnel.Config{}, err
+	}
+	tcpFallback, err := durationOrDefault(raw.TCPFallback, 3*time.Second, "tcp_fallback")
 	if err != nil {
 		return tunnel.Config{}, err
 	}
@@ -155,11 +163,11 @@ func loadManagedConfig(path string) (tunnel.Config, error) {
 	return buildTunnelConfig(
 		raw.Mode, raw.Network, raw.Peer, local, wireGuard, raw.StatusSocket,
 		raw.Carrier.ClientToServer, raw.Carrier.ServerToClient,
-		key, keepalive, deadTimeout, maxPayload, maxPPS, maxMegabits, relay,
+		key, keepalive, deadTimeout, tcpFallback, maxPayload, maxPPS, maxMegabits, raw.ICMPPacingPPS, relay,
 	)
 }
 
-func buildTunnelConfig(mode, networkAddr, peerAddr, localAddr, wireGuardAddr, statusSocket, clientTX, serverTX string, key []byte, keepalive, deadTimeout time.Duration, maxPayload, maxPPS, maxMegabits int, relay *tunnel.RelayConfig) (tunnel.Config, error) {
+func buildTunnelConfig(mode, networkAddr, peerAddr, localAddr, wireGuardAddr, statusSocket, clientTX, serverTX string, key []byte, keepalive, deadTimeout, tcpFallback time.Duration, maxPayload, maxPPS, maxMegabits, icmpPacingPPS int, relay *tunnel.RelayConfig) (tunnel.Config, error) {
 	if clientTX == "" {
 		clientTX = string(tunnel.CarrierICMP)
 	}
@@ -194,8 +202,8 @@ func buildTunnelConfig(mode, networkAddr, peerAddr, localAddr, wireGuardAddr, st
 		Mode: tunnel.Mode(mode), Network: network, Peer: peer, Local: local,
 		WireGuard: wireGuard, Key: key, StatusSocket: statusSocket,
 		ClientTX: tunnel.DataCarrier(clientTX), ServerTX: tunnel.DataCarrier(serverTX),
-		Keepalive: keepalive, DeadTimeout: deadTimeout, MaxPayload: maxPayload,
-		MaxPPS: maxPPS, MaxMegabits: maxMegabits, Relay: relay,
+		Keepalive: keepalive, DeadTimeout: deadTimeout, TCPFallback: tcpFallback, MaxPayload: maxPayload,
+		MaxPPS: maxPPS, MaxMegabits: maxMegabits, ICMPPacingPPS: icmpPacingPPS, Relay: relay,
 	}
 	if err := tunnel.ValidateConfig(cfg); err != nil {
 		return tunnel.Config{}, err

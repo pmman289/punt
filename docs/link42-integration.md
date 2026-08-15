@@ -51,9 +51,11 @@ Punt 受管启动使用严格 JSON。未知字段会使启动失败，避免 Age
 | `status_socket` | 否 | 绝对 Unix socket 路径，例如 `/run/link42-punt/<instance>.sock` |
 | `keepalive` | 否 | Go duration，默认 `5s` |
 | `dead_timeout` | 否 | Go duration，默认 `15s` |
+| `tcp_fallback` | 否 | UDP control 失败后启用 TCP control 的延迟，默认 `3s`；`0s` 禁用 |
 | `max_payload` | 否 | 最大认证数据 payload，默认 `1400` |
 | `max_pps` | 否 | 数据载体 PPS 上限，默认 `10000` |
 | `max_mbps` | 否 | 数据载体速率上限，默认 `100` |
+| `icmp_pacing_pps` | 否 | 本机 ICMP WireGuard 发送方向的节奏目标；`0` 禁用，且不得高于 `max_pps` |
 
 `network` 不是“用户从公网访问的地址”。例如服务端位于 DNAT/EIP 后时，
 `network` 必须使用服务端网卡实际拥有的内网地址；客户端的 `peer` 才使用公网
@@ -72,6 +74,12 @@ protocol/listen_side/tcp_nocwnd，并按
 确定，不得根据 relay `listen_side` 或应用流量方向交换。非默认组合会在数据
 probe 中校验一致性，不匹配的实例不会进入 `ESTABLISHED`。
 
+`tcp_fallback` 只影响 control 平面：客户端在 UDP HELLO 未建立会话时，用相同
+`network` 端口建立到服务端 `peer` 的 TCP 连接来交换认证 HELLO/ACK，数据仍由
+ICMP 或 UDP carrier 承载。服务端 TCP 端口与 control UDP 端口相同；TCP bind
+失败不会阻止原有 UDP 模式启动。Link42 应只在确认服务端 TCP 入站可达、客户端
+NAT 保持 TCP/UDP 端口时启用该能力。
+
 ## Link42 middleware 映射
 
 建议在 Link42 增加 `PuntMiddlewareConfig`，包含：
@@ -83,7 +91,7 @@ server_bind_ipv4, server_bind_udp_port
 client_bind_ipv4, client_bind_udp_port
 local_wrapper_port, peer_wrapper_port
 client_to_server_carrier, server_to_client_carrier
-keepalive, dead_timeout, max_payload, max_pps, max_mbps
+keepalive, dead_timeout, tcp_fallback, max_payload, max_pps, max_mbps, icmp_pacing_pps
 generated_punt_key
 ```
 

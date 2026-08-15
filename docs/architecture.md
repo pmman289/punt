@@ -143,6 +143,11 @@ UDP_PROBING
 4. UDP ACK 超时、服务端 HELLO 超时或 NAT tuple 变化时，现有 session 被废弃
    并重新探测。
 
+当客户端在 `tcp_fallback` 时间内收不到 UDP ACK 时，会从与 `network` 相同的
+本地端口建立 TCP control 连接，并在 TCP 上交换同样经过认证的 HELLO/ACK。客户端
+仍持续发送 UDP HELLO 创建映射；服务端使用 TCP 观察到的公网 IP 和 HELLO 声明的
+UDP 端口构造 ICMP tuple。TCP control 不承载数据，UDP 恢复后优先切回 UDP control。
+
 ## WireGuard 接入
 
 兼容模式监听 `-local`，并用同一个 UDP socket 向 `-wireguard` 注入解出的

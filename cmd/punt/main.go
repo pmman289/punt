@@ -40,6 +40,7 @@ func execute(args []string, stdout, stderr io.Writer) error {
 		wireGuard:   "127.0.0.1:51820",
 		keepalive:   5 * time.Second,
 		deadTimeout: 15 * time.Second,
+		tcpFallback: 3 * time.Second,
 		maxPayload:  protocol.MaxPayload,
 		maxPPS:      10000,
 		maxMegabits: 100,
@@ -60,9 +61,11 @@ func execute(args []string, stdout, stderr io.Writer) error {
 	flags.StringVar(&values.statusSocket, "status-socket", "", "absolute Unix socket path for local status queries")
 	flags.DurationVar(&values.keepalive, "keepalive", values.keepalive, "real UDP HELLO keepalive interval")
 	flags.DurationVar(&values.deadTimeout, "dead-timeout", values.deadTimeout, "UDP control timeout before reprobe")
+	flags.DurationVar(&values.tcpFallback, "tcp-fallback", values.tcpFallback, "delay before falling back from UDP to TCP control; 0 disables")
 	flags.IntVar(&values.maxPayload, "max-payload", values.maxPayload, "maximum authenticated data payload bytes")
 	flags.IntVar(&values.maxPPS, "max-pps", values.maxPPS, "maximum data carrier packets per second")
 	flags.IntVar(&values.maxMegabits, "max-mbps", values.maxMegabits, "maximum data carrier megabits per second")
+	flags.IntVar(&values.icmpPacingPPS, "icmp-pacing-pps", 0, "WireGuard-over-ICMP outbound pacing target; 0 disables pacing")
 	flags.StringVar(&values.clientTX, "client-tx", values.clientTX, "client-to-server data carrier: icmp or udp")
 	flags.StringVar(&values.serverTX, "server-tx", values.serverTX, "server-to-client data carrier: icmp or udp")
 	flags.StringVar(&values.relay, "relay", "", "application relay protocol: udp or tcp")

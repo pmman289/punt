@@ -29,22 +29,24 @@ const (
 )
 
 type Config struct {
-	Mode         Mode
-	Network      *net.UDPAddr // Public-facing local IPv4 address and UDP port.
-	Peer         *net.UDPAddr // Required only in client mode.
-	Local        *net.UDPAddr // Wrapper endpoint WireGuard sends to.
-	WireGuard    *net.UDPAddr // WireGuard ListenPort endpoint.
-	Relay        *RelayConfig // Optional explicit local application relay.
-	Key          []byte
-	Keepalive    time.Duration
-	DeadTimeout  time.Duration
-	MaxPayload   int
-	MaxPPS       int
-	MaxMegabits  int
-	ClientTX     DataCarrier // Data carrier from underlay client to server.
-	ServerTX     DataCarrier // Data carrier from underlay server to client.
-	StatusSocket string      // Optional absolute Unix socket path for local status queries.
-	Logger       *log.Logger
+	Mode          Mode
+	Network       *net.UDPAddr // Public-facing local IPv4 address and UDP port.
+	Peer          *net.UDPAddr // Required only in client mode.
+	Local         *net.UDPAddr // Wrapper endpoint WireGuard sends to.
+	WireGuard     *net.UDPAddr // WireGuard ListenPort endpoint.
+	Relay         *RelayConfig // Optional explicit local application relay.
+	Key           []byte
+	Keepalive     time.Duration
+	DeadTimeout   time.Duration
+	TCPFallback   time.Duration // UDP control fallback delay; zero disables TCP control.
+	MaxPayload    int
+	MaxPPS        int
+	MaxMegabits   int
+	ICMPPacingPPS int         // Optional WireGuard-over-ICMP outbound pacing target.
+	ClientTX      DataCarrier // Data carrier from underlay client to server.
+	ServerTX      DataCarrier // Data carrier from underlay server to client.
+	StatusSocket  string      // Optional absolute Unix socket path for local status queries.
+	Logger        *log.Logger
 }
 
 // RuntimeStats contains counters suitable for a local orchestration agent.
@@ -65,26 +67,28 @@ type RuntimeStats struct {
 // RuntimeStatus is returned only through the locally permissioned Unix socket.
 // It intentionally excludes the shared key and application payloads.
 type RuntimeStatus struct {
-	Mode          string       `json:"mode"`
-	Transport     string       `json:"transport"`
-	ListenSide    string       `json:"listen_side,omitempty"`
-	State         string       `json:"state"`
-	Network       string       `json:"network"`
-	Peer          string       `json:"peer,omitempty"`
-	Listen        string       `json:"listen,omitempty"`
-	Target        string       `json:"target,omitempty"`
-	ActiveFlows   int          `json:"active_flows"`
-	QueuedRaw     int          `json:"queued_raw"`
-	QueuedUDP     int          `json:"queued_udp"`
-	ClientTX      string       `json:"client_to_server"`
-	ServerTX      string       `json:"server_to_client"`
-	TCPNoCwnd     bool         `json:"tcp_nocwnd,omitempty"`
-	LearnedRemote string       `json:"learned_remote,omitempty"`
-	StartedAt     time.Time    `json:"started_at"`
-	LastHelloAt   *time.Time   `json:"last_hello_at,omitempty"`
-	LastAckAt     *time.Time   `json:"last_ack_at,omitempty"`
-	LastRawAt     *time.Time   `json:"last_raw_at,omitempty"`
-	Stats         RuntimeStats `json:"stats"`
+	Mode             string       `json:"mode"`
+	Transport        string       `json:"transport"`
+	ListenSide       string       `json:"listen_side,omitempty"`
+	State            string       `json:"state"`
+	Network          string       `json:"network"`
+	Peer             string       `json:"peer,omitempty"`
+	Listen           string       `json:"listen,omitempty"`
+	Target           string       `json:"target,omitempty"`
+	ActiveFlows      int          `json:"active_flows"`
+	QueuedRaw        int          `json:"queued_raw"`
+	QueuedUDP        int          `json:"queued_udp"`
+	ClientTX         string       `json:"client_to_server"`
+	ServerTX         string       `json:"server_to_client"`
+	ICMPPacingPPS    int          `json:"icmp_pacing_pps,omitempty"`
+	ControlTransport string       `json:"control_transport,omitempty"`
+	TCPNoCwnd        bool         `json:"tcp_nocwnd,omitempty"`
+	LearnedRemote    string       `json:"learned_remote,omitempty"`
+	StartedAt        time.Time    `json:"started_at"`
+	LastHelloAt      *time.Time   `json:"last_hello_at,omitempty"`
+	LastAckAt        *time.Time   `json:"last_ack_at,omitempty"`
+	LastRawAt        *time.Time   `json:"last_raw_at,omitempty"`
+	Stats            RuntimeStats `json:"stats"`
 }
 
 type state uint8
@@ -120,6 +124,9 @@ type eventType uint8
 
 const (
 	controlEvent eventType = iota
+	tcpControlEvent
+	tcpControlConnectedEvent
+	tcpControlClosedEvent
 	rawEvent
 	wireGuardEvent
 	statusEvent
@@ -137,6 +144,7 @@ type event struct {
 	type_          eventType
 	data           []byte
 	addr           *net.UDPAddr
+	viaTCP         bool
 	err            error
 	statusResponse chan<- RuntimeStatus
 	flowID         uint32
@@ -192,34 +200,44 @@ func minFloat(a, b float64) float64 {
 }
 
 type engine struct {
+	ctx     context.Context
+	events  chan event
 	cfg     Config
 	control *net.UDPConn
 	local   *net.UDPConn
 	raw     *rawSocket
 
-	state         state
-	remote        *net.UDPAddr
-	clientSession uint64
-	serverSession uint64
-	nonce         uint64
-	expectedProbe []byte
-	sequence      uint32
-	packetID      uint16
-	lastHello     time.Time
-	lastAck       time.Time
-	lastProbe     time.Time
-	lastRaw       time.Time
-	lastStats     time.Time
-	startedAt     time.Time
-	limiter       limiter
-	stats         stats
-	udpRelay      *udpRelay
-	tcpRelay      *tcpRelay
-	rawQueue      []queuedRaw
-	udpQueue      []queuedUDP
+	state            state
+	remote           *net.UDPAddr
+	clientSession    uint64
+	serverSession    uint64
+	nonce            uint64
+	tcpNonce         uint64
+	expectedProbe    []byte
+	sequence         uint32
+	packetID         uint16
+	lastHello        time.Time
+	lastTCPHello     time.Time
+	lastTCPDial      time.Time
+	lastAck          time.Time
+	lastProbe        time.Time
+	lastRaw          time.Time
+	lastStats        time.Time
+	startedAt        time.Time
+	limiter          limiter
+	stats            stats
+	udpRelay         *udpRelay
+	tcpRelay         *tcpRelay
+	tcpControl       *net.TCPConn
+	tcpDialing       bool
+	controlTransport string
+	rawQueue         []queuedRaw
+	udpQueue         []queuedUDP
 }
 
 const maxReliableCarrierQueue = 256
+
+const maxPacedWireGuardQueue = 4096
 
 type queuedRaw struct {
 	packet      []byte
@@ -253,8 +271,14 @@ func ValidateConfig(cfg Config) error {
 	if cfg.Keepalive <= 0 || cfg.DeadTimeout < cfg.Keepalive*2 {
 		return errors.New("dead timeout must be at least twice the keepalive interval")
 	}
+	if cfg.TCPFallback < 0 {
+		return errors.New("TCP fallback delay cannot be negative")
+	}
 	if cfg.MaxPayload < 1 || cfg.MaxPayload > protocol.MaxPayload || cfg.MaxPPS < 1 || cfg.MaxMegabits < 1 {
 		return errors.New("invalid payload, PPS, or bandwidth limit")
+	}
+	if cfg.ICMPPacingPPS < 0 || cfg.ICMPPacingPPS > cfg.MaxPPS {
+		return errors.New("ICMP pacing PPS must be between zero and max PPS")
 	}
 	if !validCarrier(cfg.ClientTX) || !validCarrier(cfg.ServerTX) {
 		return errors.New("client and server transmit carriers must be icmp or udp")
@@ -310,7 +334,16 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	e.logf("started mode=%s network=%s", cfg.Mode, cfg.Network)
 
-	events := make(chan event, 1024)
+	eventQueueSize := 1024
+	if cfg.ICMPPacingPPS > 0 {
+		// WireGuard writes to its local UDP socket without carrier backpressure.
+		// A deeper event queue absorbs a short scheduler delay while pacing drains
+		// packets at a controlled rate.
+		eventQueueSize = 4096
+	}
+	events := make(chan event, eventQueueSize)
+	e.ctx = ctx
+	e.events = events
 	var statusServer *statusServer
 	if cfg.StatusSocket != "" {
 		statusServer, err = startStatusServer(ctx, cfg.StatusSocket, events)
@@ -318,6 +351,14 @@ func Run(ctx context.Context, cfg Config) error {
 			return fmt.Errorf("start status socket: %w", err)
 		}
 		defer statusServer.Close()
+	}
+	if cfg.Mode == Server && cfg.TCPFallback > 0 {
+		listener, listenErr := startTCPControlListener(ctx, cfg.Network, events)
+		if listenErr != nil {
+			e.logf("TCP control fallback unavailable on %s: %v", cfg.Network, listenErr)
+		} else {
+			defer listener.Close()
+		}
 	}
 	go readUDP(control, controlEvent, events)
 	if cfg.Relay == nil {
@@ -345,18 +386,24 @@ func Run(ctx context.Context, cfg Config) error {
 		go readRaw(raw, events)
 	}
 	if cfg.Mode == Client {
-		e.sendHello(time.Now())
+		e.sendUDPHello(time.Now())
 	}
 
 	tickInterval := 250 * time.Millisecond
 	if cfg.Relay != nil && cfg.Relay.Protocol == RelayTCP {
 		tickInterval = 10 * time.Millisecond
+	} else if e.pacesWireGuardICMP() {
+		// ICMP error paths are frequently policer-sensitive. Millisecond pacing
+		// keeps WireGuard data below a large user-space burst while probes remain
+		// immediate.
+		tickInterval = time.Millisecond
 	}
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			e.closeTCPControl()
 			e.logf("stopped: control in/out=%d/%d raw in/out=%d/%d udp data in/out=%d/%d wg in/out=%d/%d dropped=%d invalid=%d", e.stats.controlIn, e.stats.controlOut, e.stats.rawIn, e.stats.rawOut, e.stats.udpDataIn, e.stats.udpDataOut, e.stats.wgIn, e.stats.wgOut, e.stats.dropped, e.stats.invalid)
 			return nil
 		case ev := <-events:
@@ -400,6 +447,14 @@ func (e *engine) handleEvent(ev event) {
 	switch ev.type_ {
 	case controlEvent:
 		e.handleUDP(ev.data, ev.addr)
+	case tcpControlEvent:
+		e.handleTCPControl(ev.data, ev.addr, ev.conn)
+	case tcpControlConnectedEvent:
+		e.handleTCPControlConnected(ev.conn, ev.err)
+	case tcpControlClosedEvent:
+		if ev.conn == e.tcpControl {
+			e.tcpControl = nil
+		}
 	case rawEvent:
 		e.handleRaw(ev.data)
 	case wireGuardEvent:
@@ -433,7 +488,9 @@ func (e *engine) runtimeStatus() RuntimeStatus {
 	status := RuntimeStatus{
 		Mode: string(e.cfg.Mode), State: e.state.String(), Network: e.cfg.Network.String(),
 		ClientTX: string(carrierOrDefault(e.cfg.ClientTX)), ServerTX: string(carrierOrDefault(e.cfg.ServerTX)),
-		Peer: formatAddr(e.cfg.Peer), LearnedRemote: formatAddr(e.remote), StartedAt: e.startedAt,
+		ICMPPacingPPS:    e.cfg.ICMPPacingPPS,
+		ControlTransport: e.controlTransport,
+		Peer:             formatAddr(e.cfg.Peer), LearnedRemote: formatAddr(e.remote), StartedAt: e.startedAt,
 		LastHelloAt: timePointer(e.lastHello), LastAckAt: timePointer(e.lastAck), LastRawAt: timePointer(e.lastRaw),
 		Stats: RuntimeStats{
 			ControlIn: e.stats.controlIn, ControlOut: e.stats.controlOut,
@@ -466,12 +523,20 @@ func (e *engine) runtimeStatus() RuntimeStatus {
 func (e *engine) handleUDP(packet []byte, sender *net.UDPAddr) {
 	switch protocol.ClassifyEnvelope(packet) {
 	case protocol.ControlEnvelope:
-		e.handleControl(packet, sender)
+		e.handleControl(packet, sender, nil, false)
 	case protocol.DataEnvelope:
 		e.handleUDPData(packet, sender)
 	default:
 		e.stats.invalid++
 	}
+}
+
+func (e *engine) handleTCPControl(packet []byte, sender *net.UDPAddr, conn *net.TCPConn) {
+	if protocol.ClassifyEnvelope(packet) != protocol.ControlEnvelope {
+		e.stats.invalid++
+		return
+	}
+	e.handleControl(packet, sender, conn, true)
 }
 
 func formatAddr(addr *net.UDPAddr) string {
@@ -489,7 +554,7 @@ func timePointer(value time.Time) *time.Time {
 	return &copy
 }
 
-func (e *engine) handleControl(packet []byte, sender *net.UDPAddr) {
+func (e *engine) handleControl(packet []byte, sender *net.UDPAddr, conn *net.TCPConn, viaTCP bool) {
 	m, err := protocol.ParseControl(packet, e.cfg.Key)
 	if err != nil {
 		e.stats.invalid++
@@ -506,20 +571,43 @@ func (e *engine) handleControl(packet []byte, sender *net.UDPAddr) {
 			e.stats.invalid++
 			return
 		}
-		if e.remote == nil || e.clientSession != m.ClientSession || !sameAddr(e.remote, sender) {
+		remote := sender
+		if viaTCP {
+			if m.ObservedPort == 0 {
+				e.stats.invalid++
+				return
+			}
+			remote = &net.UDPAddr{IP: append(net.IP(nil), sender.IP...), Port: int(m.ObservedPort)}
+		}
+		if e.remote == nil || e.clientSession != m.ClientSession || !sameAddr(e.remote, remote) {
 			e.resetRelays()
-			e.remote = cloneAddr(sender)
+			e.remote = cloneAddr(remote)
 			e.clientSession = m.ClientSession
 			e.serverSession = randomUint64()
 			e.state = udpProbing
-			e.logf("learned UDP NAT tuple %s", e.remote)
+			if viaTCP {
+				e.logf("learned TCP-assisted ICMP tuple %s", e.remote)
+			} else {
+				e.logf("learned UDP NAT tuple %s", e.remote)
+			}
+		}
+		if viaTCP {
+			e.replaceTCPControl(conn)
+			e.controlTransport = "tcp"
+		} else {
+			e.closeTCPControl()
+			e.controlTransport = "udp"
 		}
 		e.lastHello = now
-		e.sendHelloAck(m.Nonce)
+		e.sendHelloAck(m.Nonce, viaTCP)
 		return
 	}
 
-	if m.Type != protocol.HelloAck || !sameAddr(sender, e.cfg.Peer) || m.ClientSession != e.clientSession || m.Nonce != e.nonce || m.ServerSession == 0 || m.ObservedPort == 0 {
+	expectedNonce := e.nonce
+	if viaTCP {
+		expectedNonce = e.tcpNonce
+	}
+	if m.Type != protocol.HelloAck || !sameAddr(sender, e.cfg.Peer) || m.ClientSession != e.clientSession || m.Nonce != expectedNonce || m.ServerSession == 0 || m.ObservedPort == 0 {
 		e.stats.invalid++
 		return
 	}
@@ -529,6 +617,12 @@ func (e *engine) handleControl(packet []byte, sender *net.UDPAddr) {
 	}
 	e.serverSession = m.ServerSession
 	e.lastAck = now
+	if viaTCP {
+		e.controlTransport = "tcp"
+	} else {
+		e.closeTCPControl()
+		e.controlTransport = "udp"
+	}
 	if newSession || e.state == udpProbing {
 		e.transition(icmpProbing)
 		e.sendProbe()
@@ -633,7 +727,7 @@ func (e *engine) handleWireGuard(payload []byte, sender *net.UDPAddr) {
 		e.stats.dropped++
 		return
 	}
-	e.sendData(protocol.Packet, payload)
+	e.sendDataWithQueue(protocol.Packet, payload, e.pacesWireGuardICMP())
 }
 
 func (e *engine) handleRelayClient(payload []byte, sender *net.UDPAddr) {
@@ -729,7 +823,7 @@ func (e *engine) handleTCPConnected(flowID uint32, conn *net.TCPConn, err error)
 	e.tcpRelay.targetConnected(flowID, conn, err, time.Now())
 }
 
-func (e *engine) sendHello(now time.Time) {
+func (e *engine) sendUDPHello(now time.Time) {
 	if e.cfg.Mode != Client {
 		return
 	}
@@ -744,12 +838,43 @@ func (e *engine) sendHello(now time.Time) {
 	e.stats.controlOut++
 }
 
-func (e *engine) sendHelloAck(nonce uint64) {
+func (e *engine) sendTCPHello(now time.Time) {
+	if e.cfg.Mode != Client || e.tcpControl == nil {
+		return
+	}
+	e.tcpNonce = randomUint64()
+	m := protocol.Control{
+		Type: protocol.Hello, ClientSession: e.clientSession, Nonce: e.tcpNonce,
+		Timestamp: uint64(now.Unix()), ObservedPort: uint16(e.cfg.Network.Port),
+	}
+	b, _ := m.Marshal(e.cfg.Key)
+	if _, err := e.tcpControl.Write(b); err != nil {
+		e.logf("send TCP HELLO: %v", err)
+		e.closeTCPControl()
+		return
+	}
+	e.lastTCPHello = now
+	e.stats.controlOut++
+}
+
+func (e *engine) sendHelloAck(nonce uint64, viaTCP bool) {
 	if e.remote == nil {
 		return
 	}
 	m := protocol.Control{Type: protocol.HelloAck, ClientSession: e.clientSession, ServerSession: e.serverSession, Nonce: nonce, Timestamp: uint64(time.Now().Unix()), ObservedPort: uint16(e.remote.Port)}
 	b, _ := m.Marshal(e.cfg.Key)
+	if viaTCP {
+		if e.tcpControl == nil {
+			return
+		}
+		if _, err := e.tcpControl.Write(b); err != nil {
+			e.logf("send TCP HELLO_ACK: %v", err)
+			e.closeTCPControl()
+			return
+		}
+		e.stats.controlOut++
+		return
+	}
 	if _, err := e.control.WriteToUDP(b, e.remote); err != nil {
 		e.logf("send HELLO_ACK: %v", err)
 		return
@@ -840,7 +965,13 @@ func (e *engine) sendUDPData(packet []byte, reliable bool) {
 }
 
 func (e *engine) enqueueRaw(packet []byte, destination Tuple) {
-	if len(e.rawQueue) >= maxReliableCarrierQueue {
+	limit := maxReliableCarrierQueue
+	if e.pacesWireGuardICMP() {
+		// A paced WireGuard flow needs enough room for a temporary UDP burst.
+		// The limit still bounds memory to roughly six MiB at the largest packet.
+		limit = maxPacedWireGuardQueue
+	}
+	if len(e.rawQueue) >= limit {
 		e.stats.dropped++
 		return
 	}
@@ -856,7 +987,16 @@ func (e *engine) enqueueUDP(packet []byte, destination *net.UDPAddr) {
 }
 
 func (e *engine) flushRawQueue(now time.Time) {
-	for len(e.rawQueue) > 0 {
+	limit := len(e.rawQueue)
+	if e.pacesWireGuardICMP() {
+		// One tick must not repay a delayed scheduler wakeup with an equally
+		// large ICMP burst. The explicit pacing target controls this direction.
+		batch := max(1, (e.cfg.ICMPPacingPPS+999)/1000)
+		if limit > batch {
+			limit = batch
+		}
+	}
+	for sent := 0; sent < limit && len(e.rawQueue) > 0; sent++ {
 		next := e.rawQueue[0]
 		if !e.limiter.allow(now, len(next.packet)) {
 			return
@@ -894,13 +1034,21 @@ func (e *engine) tick(now time.Time) {
 	e.flushUDPQueue(now)
 	if e.cfg.Mode == Client {
 		if now.Sub(e.lastHello) >= e.cfg.Keepalive {
-			e.sendHello(now)
+			e.sendUDPHello(now)
+		}
+		if e.tcpControl != nil && now.Sub(e.lastTCPHello) >= e.cfg.Keepalive {
+			e.sendTCPHello(now)
+		}
+		if e.cfg.TCPFallback > 0 && e.tcpControl == nil && !e.tcpDialing && e.lastAck.IsZero() && now.Sub(e.startedAt) >= e.cfg.TCPFallback && now.Sub(e.lastTCPDial) >= e.cfg.Keepalive {
+			e.startTCPControlDial()
 		}
 		if !e.lastAck.IsZero() && now.Sub(e.lastAck) > e.cfg.DeadTimeout {
 			e.resetRelays()
 			e.transition(udpProbing)
 			e.serverSession = 0
 			e.expectedProbe = nil
+			e.closeTCPControl()
+			e.controlTransport = ""
 		}
 		if e.state == established && now.Sub(e.lastProbe) >= e.cfg.Keepalive*2 {
 			e.sendProbe()
@@ -949,6 +1097,10 @@ func carrierOrDefault(carrier DataCarrier) DataCarrier {
 
 func configUsesICMP(cfg Config) bool {
 	return carrierOrDefault(cfg.ClientTX) == CarrierICMP || carrierOrDefault(cfg.ServerTX) == CarrierICMP
+}
+
+func (e *engine) pacesWireGuardICMP() bool {
+	return e.cfg.ICMPPacingPPS > 0 && e.cfg.Relay == nil && (e.cfg.Mode == Client || e.cfg.Mode == Server) && e.localCarrier() == CarrierICMP
 }
 
 func (e *engine) localCarrier() DataCarrier {
