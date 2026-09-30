@@ -9,6 +9,9 @@
     "listen_side": "client",
     "listen": "127.0.0.1:8080",
     "tcp_nocwnd": false,
+    "kcp_window": 512,
+    "kcp_interval": 10,
+    "kcp_fast_resend": 2,
     "idle_timeout": "5m"
   },
   "keepalive": "5s",
@@ -16,6 +19,9 @@
   "max_payload": 1400,
   "max_pps": 10000,
   "max_mbps": 100,
+  "burst": "100ms",
+  "queue_packets": 4096,
+  "socket_buffer": 4194304,
   "carrier": {
     "client_to_server": "icmp",
     "server_to_client": "icmp"

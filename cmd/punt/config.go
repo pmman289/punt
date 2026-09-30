@@ -31,6 +31,9 @@ type cliConfig struct {
 	maxPayload    int
 	maxPPS        int
 	maxMegabits   int
+	queuePackets  int
+	burst         time.Duration
+	socketBuffer  int
 	icmpPacingPPS int
 	clientTX      string
 	serverTX      string
@@ -40,6 +43,9 @@ type cliConfig struct {
 	target        string
 	relayIdle     time.Duration
 	tcpNoCwnd     bool
+	kcpWindow     int
+	kcpInterval   int
+	kcpFastResend int
 }
 
 // managedConfig is the stable file contract consumed by Link42-managed units.
@@ -57,6 +63,9 @@ type managedConfig struct {
 	MaxPayload    int                  `json:"max_payload,omitempty"`
 	MaxPPS        int                  `json:"max_pps,omitempty"`
 	MaxMegabits   int                  `json:"max_mbps,omitempty"`
+	QueuePackets  int                  `json:"queue_packets,omitempty"`
+	Burst         string               `json:"burst,omitempty"`
+	SocketBuffer  int                  `json:"socket_buffer,omitempty"`
 	ICMPPacingPPS int                  `json:"icmp_pacing_pps,omitempty"`
 	Carrier       managedCarrierConfig `json:"carrier,omitempty"`
 	Relay         *managedRelayConfig  `json:"relay,omitempty"`
@@ -68,12 +77,15 @@ type managedCarrierConfig struct {
 }
 
 type managedRelayConfig struct {
-	Protocol    string `json:"protocol"`
-	ListenSide  string `json:"listen_side,omitempty"`
-	Listen      string `json:"listen,omitempty"`
-	Target      string `json:"target,omitempty"`
-	IdleTimeout string `json:"idle_timeout,omitempty"`
-	TCPNoCwnd   bool   `json:"tcp_nocwnd,omitempty"`
+	Protocol      string `json:"protocol"`
+	ListenSide    string `json:"listen_side,omitempty"`
+	Listen        string `json:"listen,omitempty"`
+	Target        string `json:"target,omitempty"`
+	IdleTimeout   string `json:"idle_timeout,omitempty"`
+	TCPNoCwnd     bool   `json:"tcp_nocwnd,omitempty"`
+	KCPWindow     int    `json:"kcp_window,omitempty"`
+	KCPInterval   int    `json:"kcp_interval,omitempty"`
+	KCPFastResend int    `json:"kcp_fast_resend,omitempty"`
 }
 
 func (c cliConfig) tunnelConfig() (tunnel.Config, error) {
@@ -84,13 +96,13 @@ func (c cliConfig) tunnelConfig() (tunnel.Config, error) {
 	if err != nil {
 		return tunnel.Config{}, err
 	}
-	relay, err := buildRelayConfig(c.mode, c.relay, c.listenSide, c.listen, c.target, c.relayIdle, c.tcpNoCwnd)
+	relay, err := buildRelayConfig(c.mode, c.relay, c.listenSide, c.listen, c.target, c.relayIdle, c.tcpNoCwnd, c.kcpWindow, c.kcpInterval, c.kcpFastResend)
 	if err != nil {
 		return tunnel.Config{}, err
 	}
 	return buildTunnelConfig(
 		c.mode, c.network, c.peer, c.local, c.wireGuard, c.statusSocket,
-		c.clientTX, c.serverTX, key, c.keepalive, c.deadTimeout, c.tcpFallback, c.maxPayload, c.maxPPS, c.maxMegabits, c.icmpPacingPPS, relay,
+		c.clientTX, c.serverTX, key, c.keepalive, c.deadTimeout, c.tcpFallback, c.maxPayload, c.maxPPS, c.maxMegabits, c.queuePackets, c.burst, c.socketBuffer, c.icmpPacingPPS, relay,
 	)
 }
 
@@ -126,6 +138,10 @@ func loadManagedConfig(path string) (tunnel.Config, error) {
 	if err != nil {
 		return tunnel.Config{}, err
 	}
+	burst, err := durationOrDefault(raw.Burst, 100*time.Millisecond, "burst")
+	if err != nil {
+		return tunnel.Config{}, err
+	}
 	var relay *tunnel.RelayConfig
 	if raw.Relay != nil {
 		if raw.Local != "" || raw.WireGuard != "" {
@@ -135,7 +151,7 @@ func loadManagedConfig(path string) (tunnel.Config, error) {
 		if err != nil {
 			return tunnel.Config{}, err
 		}
-		relay, err = buildRelayConfig(raw.Mode, raw.Relay.Protocol, raw.Relay.ListenSide, raw.Relay.Listen, raw.Relay.Target, idle, raw.Relay.TCPNoCwnd)
+		relay, err = buildRelayConfig(raw.Mode, raw.Relay.Protocol, raw.Relay.ListenSide, raw.Relay.Listen, raw.Relay.Target, idle, raw.Relay.TCPNoCwnd, raw.Relay.KCPWindow, raw.Relay.KCPInterval, raw.Relay.KCPFastResend)
 		if err != nil {
 			return tunnel.Config{}, err
 		}
@@ -163,11 +179,11 @@ func loadManagedConfig(path string) (tunnel.Config, error) {
 	return buildTunnelConfig(
 		raw.Mode, raw.Network, raw.Peer, local, wireGuard, raw.StatusSocket,
 		raw.Carrier.ClientToServer, raw.Carrier.ServerToClient,
-		key, keepalive, deadTimeout, tcpFallback, maxPayload, maxPPS, maxMegabits, raw.ICMPPacingPPS, relay,
+		key, keepalive, deadTimeout, tcpFallback, maxPayload, maxPPS, maxMegabits, raw.QueuePackets, burst, raw.SocketBuffer, raw.ICMPPacingPPS, relay,
 	)
 }
 
-func buildTunnelConfig(mode, networkAddr, peerAddr, localAddr, wireGuardAddr, statusSocket, clientTX, serverTX string, key []byte, keepalive, deadTimeout, tcpFallback time.Duration, maxPayload, maxPPS, maxMegabits, icmpPacingPPS int, relay *tunnel.RelayConfig) (tunnel.Config, error) {
+func buildTunnelConfig(mode, networkAddr, peerAddr, localAddr, wireGuardAddr, statusSocket, clientTX, serverTX string, key []byte, keepalive, deadTimeout, tcpFallback time.Duration, maxPayload, maxPPS, maxMegabits, queuePackets int, burst time.Duration, socketBuffer, icmpPacingPPS int, relay *tunnel.RelayConfig) (tunnel.Config, error) {
 	if clientTX == "" {
 		clientTX = string(tunnel.CarrierICMP)
 	}
@@ -203,7 +219,8 @@ func buildTunnelConfig(mode, networkAddr, peerAddr, localAddr, wireGuardAddr, st
 		WireGuard: wireGuard, Key: key, StatusSocket: statusSocket,
 		ClientTX: tunnel.DataCarrier(clientTX), ServerTX: tunnel.DataCarrier(serverTX),
 		Keepalive: keepalive, DeadTimeout: deadTimeout, TCPFallback: tcpFallback, MaxPayload: maxPayload,
-		MaxPPS: maxPPS, MaxMegabits: maxMegabits, ICMPPacingPPS: icmpPacingPPS, Relay: relay,
+		MaxPPS: maxPPS, MaxMegabits: maxMegabits, QueuePackets: queuePackets, Burst: burst, SocketBuffer: socketBuffer,
+		ICMPPacingPPS: icmpPacingPPS, Relay: relay,
 	}
 	if err := tunnel.ValidateConfig(cfg); err != nil {
 		return tunnel.Config{}, err
@@ -211,7 +228,7 @@ func buildTunnelConfig(mode, networkAddr, peerAddr, localAddr, wireGuardAddr, st
 	return cfg, nil
 }
 
-func buildRelayConfig(mode, protocolName, listenSide, listen, target string, idle time.Duration, tcpNoCwnd bool) (*tunnel.RelayConfig, error) {
+func buildRelayConfig(mode, protocolName, listenSide, listen, target string, idle time.Duration, tcpNoCwnd bool, kcpWindow, kcpInterval, kcpFastResend int) (*tunnel.RelayConfig, error) {
 	if protocolName == "" {
 		if listen != "" || target != "" {
 			return nil, errors.New("relay protocol is required when relay listen or target is set")
@@ -221,7 +238,7 @@ func buildRelayConfig(mode, protocolName, listenSide, listen, target string, idl
 	if listenSide == "" {
 		listenSide = string(tunnel.Client)
 	}
-	cfg := &tunnel.RelayConfig{Protocol: tunnel.RelayProtocol(protocolName), ListenSide: tunnel.Mode(listenSide), IdleTimeout: idle, TCPNoCwnd: tcpNoCwnd}
+	cfg := &tunnel.RelayConfig{Protocol: tunnel.RelayProtocol(protocolName), ListenSide: tunnel.Mode(listenSide), IdleTimeout: idle, TCPNoCwnd: tcpNoCwnd, KCPWindow: kcpWindow, KCPInterval: kcpInterval, KCPFastResend: kcpFastResend}
 	var err error
 	if listen != "" {
 		cfg.Listen, err = parseIPv4UDP("relay listen", listen)

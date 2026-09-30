@@ -11,6 +11,13 @@ go test -race ./...
 make build
 ```
 
+性能改动的验收不能只看应用端吞吐。通过状态 socket 记录测试前后的
+`tx_bytes`/`rx_bytes`、`limiter_queued`、`limiter_drops`、`queue_drops` 和
+`relay_oversize`：可靠 TCP relay 应以 `queue_drops=0` 为门槛；UDP relay 和
+WireGuard 超过配置速率时，`limiter_drops` 可以增长但不能与队列溢出混淆；
+`relay_oversize` 增长表示应用 datagram 超过单包预算，应调整应用 MTU，而不是
+盲目提高 `max_mbps`。
+
 单元测试必须至少覆盖：消息 round trip、MAC 篡改、截断包、ICMP quoted
 tuple 方向和边界检查。TCP relay 必须覆盖至少一次 KCP 数据帧丢失后的重传与
 有序回显。修复缺陷时先增加能复现缺陷的测试，再修改实现。

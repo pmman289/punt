@@ -151,6 +151,7 @@ UDP control port 只属于 Punt underlay，不暴露给应用。
 - [Link42 集成契约](docs/link42-integration.md)
 - [测试规范与已验证结果](docs/testing.md)
 - [开发规范](docs/development.md)
+- [性能审计改进 checklist](docs/optimization-checklist.md)
 
 ## 常用命令
 

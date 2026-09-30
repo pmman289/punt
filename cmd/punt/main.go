@@ -36,17 +36,20 @@ func execute(args []string, stdout, stderr io.Writer) error {
 	}
 
 	values := cliConfig{
-		local:       "127.0.0.1:51821",
-		wireGuard:   "127.0.0.1:51820",
-		keepalive:   5 * time.Second,
-		deadTimeout: 15 * time.Second,
-		tcpFallback: 3 * time.Second,
-		maxPayload:  protocol.MaxPayload,
-		maxPPS:      10000,
-		maxMegabits: 100,
-		clientTX:    string(tunnel.CarrierICMP),
-		serverTX:    string(tunnel.CarrierICMP),
-		relayIdle:   5 * time.Minute,
+		local:        "127.0.0.1:51821",
+		wireGuard:    "127.0.0.1:51820",
+		keepalive:    5 * time.Second,
+		deadTimeout:  15 * time.Second,
+		tcpFallback:  3 * time.Second,
+		maxPayload:   protocol.MaxPayload,
+		maxPPS:       10000,
+		maxMegabits:  100,
+		queuePackets: 4096,
+		burst:        100 * time.Millisecond,
+		socketBuffer: 4 << 20,
+		clientTX:     string(tunnel.CarrierICMP),
+		serverTX:     string(tunnel.CarrierICMP),
+		relayIdle:    5 * time.Minute,
 	}
 	flags := flag.NewFlagSet("punt", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -65,6 +68,9 @@ func execute(args []string, stdout, stderr io.Writer) error {
 	flags.IntVar(&values.maxPayload, "max-payload", values.maxPayload, "maximum authenticated data payload bytes")
 	flags.IntVar(&values.maxPPS, "max-pps", values.maxPPS, "maximum data carrier packets per second")
 	flags.IntVar(&values.maxMegabits, "max-mbps", values.maxMegabits, "maximum data carrier megabits per second")
+	flags.IntVar(&values.queuePackets, "queue-packets", values.queuePackets, "reliable carrier send queue depth per direction")
+	flags.DurationVar(&values.burst, "burst", values.burst, "token bucket capacity expressed as time at the configured rate")
+	flags.IntVar(&values.socketBuffer, "socket-buffer", values.socketBuffer, "UDP/raw socket buffer bytes")
 	flags.IntVar(&values.icmpPacingPPS, "icmp-pacing-pps", 0, "WireGuard-over-ICMP outbound pacing target; 0 disables pacing")
 	flags.StringVar(&values.clientTX, "client-tx", values.clientTX, "client-to-server data carrier: icmp or udp")
 	flags.StringVar(&values.serverTX, "server-tx", values.serverTX, "server-to-client data carrier: icmp or udp")
@@ -74,6 +80,9 @@ func execute(args []string, stdout, stderr io.Writer) error {
 	flags.StringVar(&values.target, "target", "", "target-side application IPv4 address")
 	flags.DurationVar(&values.relayIdle, "relay-idle-timeout", values.relayIdle, "application relay flow idle timeout")
 	flags.BoolVar(&values.tcpNoCwnd, "tcp-nocwnd", false, "disable KCP congestion window; use only with an explicit Punt rate limit")
+	flags.IntVar(&values.kcpWindow, "kcp-window", 512, "TCP relay KCP window in segments")
+	flags.IntVar(&values.kcpInterval, "kcp-interval", 10, "TCP relay KCP flush interval in milliseconds")
+	flags.IntVar(&values.kcpFastResend, "kcp-fast-resend", 2, "KCP fast retransmit threshold; -1 disables")
 	showVersion := flags.Bool("version", false, "print Punt version and exit")
 	if err := flags.Parse(args); err != nil {
 		return err

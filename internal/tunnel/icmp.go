@@ -13,6 +13,15 @@ const (
 	icmpHeaderLen = 8
 	udpHeaderLen  = 8
 	maxIPPacket   = 1500
+
+	// icmpPayloadOffset is where the quoted UDP payload starts in a generated
+	// Port Unreachable packet.
+	icmpPayloadOffset = ipv4HeaderLen + icmpHeaderLen + ipv4HeaderLen + udpHeaderLen
+)
+
+var (
+	errIPv4Only    = errors.New("only IPv4 tuples are supported")
+	errInvalidPort = errors.New("invalid UDP port")
 )
 
 type Tuple struct {
@@ -22,14 +31,37 @@ type Tuple struct {
 
 func (t Tuple) String() string { return net.JoinHostPort(t.IP.String(), fmt.Sprint(t.Port)) }
 
+func validTuples(tuples ...Tuple) error {
+	for _, t := range tuples {
+		if t.IP.To4() == nil {
+			return errIPv4Only
+		}
+	}
+	for _, t := range tuples {
+		if t.Port < 1 || t.Port > 65535 {
+			return errInvalidPort
+		}
+	}
+	return nil
+}
+
+// checksum returns the RFC 1071 Internet checksum using wide accumulators.
 func checksum(b []byte) uint16 {
-	var sum uint32
-	for len(b) >= 2 {
-		sum += uint32(binary.BigEndian.Uint16(b[:2]))
+	var sum uint64
+	for len(b) >= 8 {
+		sum += uint64(binary.BigEndian.Uint32(b[:4])) + uint64(binary.BigEndian.Uint32(b[4:8]))
+		b = b[8:]
+	}
+	if len(b) >= 4 {
+		sum += uint64(binary.BigEndian.Uint32(b[:4]))
+		b = b[4:]
+	}
+	if len(b) >= 2 {
+		sum += uint64(binary.BigEndian.Uint16(b[:2]))
 		b = b[2:]
 	}
 	if len(b) == 1 {
-		sum += uint32(b[0]) << 8
+		sum += uint64(b[0]) << 8
 	}
 	for sum>>16 != 0 {
 		sum = (sum & 0xffff) + (sum >> 16)
@@ -37,35 +69,41 @@ func checksum(b []byte) uint16 {
 	return ^uint16(sum)
 }
 
-// BuildPortUnreachable builds an IPv4/ICMP Type 3 Code 3 packet. The quoted
-// UDP packet direction is intentionally the reverse of the outer ICMP packet.
 func BuildPortUnreachable(source, destination, quotedSource, quotedDestination Tuple, payload []byte, id uint16) ([]byte, error) {
-	if source.IP.To4() == nil || destination.IP.To4() == nil || quotedSource.IP.To4() == nil || quotedDestination.IP.To4() == nil {
-		return nil, errors.New("only IPv4 tuples are supported")
+	if icmpPayloadOffset+len(payload) > maxIPPacket {
+		return nil, fmt.Errorf("packet is %d bytes, exceeds IPv4 MTU limit %d", icmpPayloadOffset+len(payload), maxIPPacket)
 	}
-	if source.Port < 1 || source.Port > 65535 || destination.Port < 1 || destination.Port > 65535 ||
-		quotedSource.Port < 1 || quotedSource.Port > 65535 || quotedDestination.Port < 1 || quotedDestination.Port > 65535 {
-		return nil, errors.New("invalid UDP port")
+	p := make([]byte, icmpPayloadOffset+len(payload))
+	copy(p[icmpPayloadOffset:], payload)
+	return finishPortUnreachable(p, source, destination, quotedSource, quotedDestination, len(payload), id)
+}
+
+// finishPortUnreachable writes headers into a buffer whose payload is already
+// at icmpPayloadOffset. It is used by the hot transmit path.
+func finishPortUnreachable(p []byte, source, destination, quotedSource, quotedDestination Tuple, payloadLen int, id uint16) ([]byte, error) {
+	if err := validTuples(source, destination, quotedSource, quotedDestination); err != nil {
+		return nil, err
 	}
-	quotedLen := ipv4HeaderLen + udpHeaderLen + len(payload)
+	quotedLen := ipv4HeaderLen + udpHeaderLen + payloadLen
 	totalLen := ipv4HeaderLen + icmpHeaderLen + quotedLen
 	if totalLen > maxIPPacket {
 		return nil, fmt.Errorf("packet is %d bytes, exceeds IPv4 MTU limit %d", totalLen, maxIPPacket)
 	}
-	p := make([]byte, totalLen)
+	if cap(p) < totalLen {
+		return nil, errors.New("ICMP build buffer too small")
+	}
+	p = p[:totalLen]
 	writeIPv4Header(p[:ipv4HeaderLen], source.IP, destination.IP, uint16(totalLen), id, 1, true)
-	p[20] = 3
-	p[21] = 3
-
+	icmp := p[ipv4HeaderLen : ipv4HeaderLen+icmpHeaderLen]
+	icmp[0], icmp[1] = 3, 3
+	clear(icmp[2:])
 	quoted := p[ipv4HeaderLen+icmpHeaderLen:]
 	writeIPv4Header(quoted[:ipv4HeaderLen], quotedSource.IP, quotedDestination.IP, uint16(quotedLen), id, 17, false)
 	udp := quoted[ipv4HeaderLen : ipv4HeaderLen+udpHeaderLen]
 	binary.BigEndian.PutUint16(udp[:2], uint16(quotedSource.Port))
 	binary.BigEndian.PutUint16(udp[2:4], uint16(quotedDestination.Port))
-	binary.BigEndian.PutUint16(udp[4:6], uint16(udpHeaderLen+len(payload)))
-	// A zero quoted UDP checksum is valid IPv4 and avoids a checksum that NAT
-	// would otherwise need to update after rewriting the quoted tuple.
-	copy(quoted[ipv4HeaderLen+udpHeaderLen:], payload)
+	binary.BigEndian.PutUint16(udp[4:6], uint16(udpHeaderLen+payloadLen))
+	udp[6], udp[7] = 0, 0
 	binary.BigEndian.PutUint16(p[22:24], checksum(p[ipv4HeaderLen:]))
 	return p, nil
 }
@@ -82,14 +120,21 @@ func writeIPv4Header(b []byte, source, destination net.IP, totalLen, id uint16, 
 	binary.BigEndian.PutUint16(b[6:8], flags)
 	b[8] = 64
 	b[9] = protocol
+	b[10], b[11] = 0, 0
 	copy(b[12:16], source.To4())
 	copy(b[16:20], destination.To4())
 	binary.BigEndian.PutUint16(b[10:12], checksum(b[:ipv4HeaderLen]))
 }
 
-// ParsePortUnreachable accepts only packets matching the complete expected
-// outer and quoted tuples and returns the quoted UDP payload.
 func ParsePortUnreachable(packet []byte, expectedOuterSource, expectedOuterDestination, expectedQuotedSource, expectedQuotedDestination Tuple) ([]byte, error) {
+	payload, err := parsePortUnreachableInPlace(packet, expectedOuterSource, expectedOuterDestination, expectedQuotedSource, expectedQuotedDestination)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), payload...), nil
+}
+
+func parsePortUnreachableInPlace(packet []byte, expectedOuterSource, expectedOuterDestination, expectedQuotedSource, expectedQuotedDestination Tuple) ([]byte, error) {
 	if len(packet) < ipv4HeaderLen+icmpHeaderLen+ipv4HeaderLen+udpHeaderLen {
 		return nil, errors.New("packet too short")
 	}
@@ -108,6 +153,9 @@ func ParsePortUnreachable(packet []byte, expectedOuterSource, expectedOuterDesti
 		return nil, errors.New("not ICMP port unreachable")
 	}
 	quoted := packet[outerLen+icmpHeaderLen : totalLen]
+	if len(quoted) < ipv4HeaderLen+udpHeaderLen {
+		return nil, errors.New("invalid quoted IPv4 header")
+	}
 	quotedLen := int(quoted[0]&0x0f) * 4
 	if quoted[0]>>4 != 4 || quotedLen < ipv4HeaderLen || quotedLen+udpHeaderLen > len(quoted) || quoted[9] != 17 {
 		return nil, errors.New("invalid quoted IPv4 header")
@@ -127,10 +175,10 @@ func ParsePortUnreachable(packet []byte, expectedOuterSource, expectedOuterDesti
 	if udpLen < udpHeaderLen || udpLen != quotedTotal-quotedLen {
 		return nil, errors.New("invalid quoted UDP length")
 	}
-	payload := quoted[quotedLen+udpHeaderLen : quotedTotal]
-	return append([]byte(nil), payload...), nil
+	return quoted[quotedLen+udpHeaderLen : quotedTotal], nil
 }
 
 func packetIPMatches(b []byte, expected net.IP) bool {
-	return expected.To4() != nil && len(b) == 4 && string(b) == string(expected.To4())
+	e := expected.To4()
+	return e != nil && len(b) == 4 && [4]byte(b) == [4]byte(e)
 }

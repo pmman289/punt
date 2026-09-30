@@ -11,6 +11,9 @@
   "max_payload": 1400,
   "max_pps": 10000,
   "max_mbps": 100,
+  "burst": "100ms",
+  "queue_packets": 4096,
+  "socket_buffer": 4194304,
   "carrier": {
     "client_to_server": "icmp",
     "server_to_client": "icmp"

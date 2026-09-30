@@ -169,8 +169,12 @@ ICMP 数据面。
 ## TCP 吞吐路径
 
 TCP relay 每次把本地读取拆成单个 KCP MSS 大小的消息，避免一个丢包阻塞整块
-32 KiB 读取。KCP 使用 512 segment 收发窗口、10 ms update 和 fast resend；
+32 KiB 读取。KCP 默认使用 512 segment 收发窗口、10 ms update 和 fast resend，
+也可按 RTT/带宽配置；
 默认保留 KCP 拥塞窗口。显式启用 `tcp_nocwnd` 后，由 Punt 的全局 Mbit/s/PPS
 limiter 负责实例级速率边界，适合经过测量的专用链路，不应作为未知路径默认值。
 可靠 TCP relay packet 在 token bucket 暂时无额度时进入对应 carrier 最多
-256 包的有界 pacing queue，而不是立即制造一次需要 KCP 重传的本地丢包。
+4096 包（可由 `queue_packets` 调整）的环形 pacing queue，而不是立即制造一次
+需要 KCP 重传的本地丢包；队列达到高水位时暂停 KCP update，并通过本地 TCP
+读协程的 ready 信号把背压传回应用。远端数据写入应用由每流 writer goroutine
+执行，慢应用不会阻塞 Punt 的控制和其它 flow。

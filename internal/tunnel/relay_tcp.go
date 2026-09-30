@@ -14,11 +14,18 @@ import (
 const maxPendingTCP = 1 << 20
 
 const (
-	tcpSendHighWater = 512
-	tcpSendLowWater  = 256
+	tcpSendHighWater   = 512
+	tcpSendLowWater    = 256
+	tcpReadChunk       = 32 * 1024
+	tcpWriteBatch      = 32 * 1024
+	tcpWriteQueue      = 64
+	defaultKCPInterval = 10
+	defaultKCPWindow   = 512
+	defaultKCPResend   = 2
 )
 
 type tcpFlow struct {
+	id        uint32
 	conn      *net.TCPConn
 	kcp       *kcp.KCP
 	opened    bool
@@ -26,21 +33,30 @@ type tcpFlow struct {
 	last      time.Time
 	lastOpen  time.Time
 	readReady chan struct{}
+	outq      chan []byte // nil means CloseWrite
+	outClosed bool
+	finQueued bool
 }
 
 type tcpRelay struct {
-	cfg      RelayConfig
-	listener bool
-	ctx      context.Context
-	listen   *net.TCPListener
-	flows    map[uint32]*tcpFlow
-	opening  map[uint32]bool
-	events   chan<- event
-	send     func(protocol.RelayFrame)
+	cfg       RelayConfig
+	listener  bool
+	ctx       context.Context
+	listen    *net.TCPListener
+	flows     map[uint32]*tcpFlow
+	opening   map[uint32]bool
+	events    chan<- event
+	send      func(protocol.RelayFrame)
+	congested func() bool
+	recvBuf   []byte
+	sendBuf   []byte
 }
 
 func startTCPRelay(ctx context.Context, mode Mode, cfg RelayConfig, events chan<- event, send func(protocol.RelayFrame)) (*tcpRelay, error) {
-	r := &tcpRelay{cfg: cfg, listener: mode == relayListenSide(cfg), ctx: ctx, flows: make(map[uint32]*tcpFlow), opening: make(map[uint32]bool), events: events, send: send}
+	limit := relayPayloadLimit(cfg)
+	r := &tcpRelay{cfg: cfg, listener: mode == relayListenSide(cfg), ctx: ctx,
+		flows: make(map[uint32]*tcpFlow), opening: make(map[uint32]bool), events: events,
+		send: send, recvBuf: make([]byte, limit), sendBuf: make([]byte, limit)}
 	if !r.listener {
 		return r, nil
 	}
@@ -70,11 +86,26 @@ func (r *tcpRelay) Close() error {
 
 func (r *tcpRelay) reset() {
 	for _, flow := range r.flows {
-		releaseTCPReader(flow)
-		_ = flow.conn.Close()
+		closeTCPFlow(flow)
 	}
 	r.flows = make(map[uint32]*tcpFlow)
 	r.opening = make(map[uint32]bool)
+}
+
+func closeTCPFlow(flow *tcpFlow) {
+	releaseTCPReader(flow)
+	if !flow.outClosed && flow.outq != nil {
+		close(flow.outq)
+		flow.outClosed = true
+	}
+	if flow.conn != nil {
+		_ = flow.conn.Close()
+	}
+}
+
+func (r *tcpRelay) removeFlow(flow *tcpFlow) {
+	closeTCPFlow(flow)
+	delete(r.flows, flow.id)
 }
 
 func (r *tcpRelay) accept() {
@@ -86,6 +117,7 @@ func (r *tcpRelay) accept() {
 			}
 			continue
 		}
+		_ = conn.SetNoDelay(true)
 		select {
 		case r.events <- event{type_: relayTCPAcceptEvent, conn: conn}:
 		case <-r.ctx.Done():
@@ -97,14 +129,13 @@ func (r *tcpRelay) accept() {
 
 func (r *tcpRelay) startReader(id uint32, conn *net.TCPConn, kind eventType) {
 	go func() {
-		buf := make([]byte, 32*1024)
+		buf := make([]byte, tcpReadChunk)
 		for {
 			n, err := conn.Read(buf)
 			if n > 0 {
-				payload := append([]byte(nil), buf[:n]...)
 				ready := make(chan struct{})
 				select {
-				case r.events <- event{type_: kind, flowID: id, data: payload, ready: ready}:
+				case r.events <- event{type_: kind, flowID: id, data: buf[:n], ready: ready}:
 				case <-r.ctx.Done():
 					return
 				}
@@ -127,20 +158,53 @@ func (r *tcpRelay) startReader(id uint32, conn *net.TCPConn, kind eventType) {
 	}()
 }
 
+func startWriter(conn *net.TCPConn, outq <-chan []byte) {
+	go func() {
+		failed := false
+		for b := range outq {
+			if failed {
+				continue
+			}
+			if b == nil {
+				_ = conn.CloseWrite()
+				continue
+			}
+			if _, err := conn.Write(b); err != nil {
+				failed = true
+				_ = conn.Close()
+			}
+		}
+	}()
+}
+
 func (r *tcpRelay) newFlow(id uint32, conn *net.TCPConn, now time.Time) *tcpFlow {
-	flow := &tcpFlow{conn: conn, last: now}
+	flow := &tcpFlow{id: id, conn: conn, last: now, outq: make(chan []byte, tcpWriteQueue)}
 	flow.kcp = kcp.NewKCP(id, func(buf []byte, size int) {
-		// KCP owns buf after this callback returns, so retain a copy for the
-		// authenticated Punt frame.
-		r.send(protocol.RelayFrame{Type: protocol.RelayTCPPacket, FlowID: id, Payload: append([]byte(nil), buf[:size]...)})
+		r.send(protocol.RelayFrame{Type: protocol.RelayTCPPacket, FlowID: id, Payload: buf[:size]})
 	})
 	_ = flow.kcp.SetMtu(relayPayloadLimit(r.cfg))
+	interval := r.cfg.KCPInterval
+	if interval <= 0 {
+		interval = defaultKCPInterval
+	}
+	resend := r.cfg.KCPFastResend
+	if resend < 0 {
+		resend = 0
+	} else if resend == 0 {
+		resend = defaultKCPResend
+	}
 	noCwnd := 0
 	if r.cfg.TCPNoCwnd {
 		noCwnd = 1
 	}
-	_ = flow.kcp.NoDelay(1, 10, 2, noCwnd)
-	flow.kcp.WndSize(512, 512)
+	_ = flow.kcp.NoDelay(1, interval, resend, noCwnd)
+	wnd := r.cfg.KCPWindow
+	if wnd <= 0 {
+		wnd = defaultKCPWindow
+	}
+	flow.kcp.WndSize(wnd, wnd)
+	_ = conn.SetNoDelay(true)
+	startWriter(conn, flow.outq)
 	r.flows[id] = flow
 	return flow
 }
@@ -187,25 +251,28 @@ func (r *tcpRelay) handleFrame(frame protocol.RelayFrame, now time.Time) error {
 		if flow == nil {
 			return errors.New("unknown TCP relay flow")
 		}
+		if flow.opened {
+			return nil
+		}
 		flow.opened = true
 		flow.last = now
-		for _, payload := range flow.pending {
-			r.sendKCP(flow, payload)
+		for _, msg := range flow.pending {
+			if flow.kcp.Send(msg) < 0 {
+				r.removeFlow(flow)
+				return nil
+			}
 		}
 		flow.pending = nil
-		r.maybeReleaseReader(flow, tcpSendHighWater)
+		r.flushKCP(flow)
+		r.maybeReleaseReader(flow, r.highWater())
 		return nil
 	case protocol.RelayTCPReject:
 		if !r.listener {
 			return errors.New("TCP rejection received by relay target side")
 		}
-		flow := r.flows[frame.FlowID]
-		if flow == nil {
-			return nil
+		if flow := r.flows[frame.FlowID]; flow != nil {
+			r.removeFlow(flow)
 		}
-		releaseTCPReader(flow)
-		_ = flow.conn.Close()
-		delete(r.flows, frame.FlowID)
 		return nil
 	case protocol.RelayTCPPacket:
 		flow := r.flows[frame.FlowID]
@@ -276,36 +343,46 @@ func (r *tcpRelay) localData(id uint32, payload []byte, eof bool, ready chan str
 	}
 	flow.last = now
 	if len(payload) > 0 {
-		framed := r.frameApplicationData(payload)
 		if !flow.opened {
 			pending := 0
 			for _, item := range flow.pending {
 				pending += len(item)
 			}
 			if pending+len(payload) > maxPendingTCP {
-				_ = flow.conn.Close()
+				r.removeFlow(flow)
 				if ready != nil {
 					close(ready)
 				}
 				return
 			}
-			flow.pending = append(flow.pending, framed...)
-		} else {
-			for _, item := range framed {
-				r.sendKCP(flow, item)
+			flow.pending = append(flow.pending, frameApplicationData(payload, r.chunkSize())...)
+		} else if !r.sendApplicationData(flow, payload) {
+			r.removeFlow(flow)
+			if ready != nil {
+				close(ready)
 			}
+			return
 		}
 	}
 	if eof {
 		fin := []byte{1}
 		if flow.opened {
-			r.sendKCP(flow, fin)
+			if flow.kcp.Send(fin) < 0 {
+				r.removeFlow(flow)
+				if ready != nil {
+					close(ready)
+				}
+				return
+			}
 		} else {
 			flow.pending = append(flow.pending, fin)
 		}
 	}
+	if flow.opened {
+		r.flushKCP(flow)
+	}
 	if ready != nil {
-		if flow.opened && flow.kcp.WaitSnd() < tcpSendHighWater {
+		if flow.opened && flow.kcp.WaitSnd() < r.highWater() {
 			close(ready)
 		} else {
 			flow.readReady = ready
@@ -313,8 +390,30 @@ func (r *tcpRelay) localData(id uint32, payload []byte, eof bool, ready chan str
 	}
 }
 
-func (r *tcpRelay) frameApplicationData(payload []byte) [][]byte {
-	chunkSize := relayPayloadLimit(r.cfg) - kcp.IKCP_OVERHEAD - 1
+func (r *tcpRelay) chunkSize() int { return relayPayloadLimit(r.cfg) - kcp.IKCP_OVERHEAD - 1 }
+
+func (r *tcpRelay) highWater() int {
+	if r.cfg.KCPWindow > tcpSendHighWater {
+		return r.cfg.KCPWindow
+	}
+	return tcpSendHighWater
+}
+
+func (r *tcpRelay) sendApplicationData(flow *tcpFlow, payload []byte) bool {
+	chunk := r.chunkSize()
+	for len(payload) > 0 {
+		n := min(len(payload), chunk)
+		r.sendBuf[0] = 0
+		copy(r.sendBuf[1:], payload[:n])
+		if flow.kcp.Send(r.sendBuf[:n+1]) < 0 {
+			return false
+		}
+		payload = payload[n:]
+	}
+	return true
+}
+
+func frameApplicationData(payload []byte, chunkSize int) [][]byte {
 	frames := make([][]byte, 0, (len(payload)+chunkSize-1)/chunkSize)
 	for len(payload) > 0 {
 		n := min(len(payload), chunkSize)
@@ -326,55 +425,56 @@ func (r *tcpRelay) frameApplicationData(payload []byte) [][]byte {
 	return frames
 }
 
-func (r *tcpRelay) sendKCP(flow *tcpFlow, payload []byte) {
-	if flow.kcp.Send(payload) < 0 {
-		_ = flow.conn.Close()
-		releaseTCPReader(flow)
+// Kept for package tests and compatibility with callers that used the helper.
+func (r *tcpRelay) frameApplicationData(payload []byte) [][]byte {
+	return frameApplicationData(payload, r.chunkSize())
+}
+
+func (r *tcpRelay) flushKCP(flow *tcpFlow) {
+	if r.congested != nil && r.congested() {
 		return
 	}
 	flow.kcp.Update()
 }
 
 func (r *tcpRelay) drain(flow *tcpFlow) {
-	message := make([]byte, relayPayloadLimit(r.cfg))
-	batch := make([]byte, 0, 32*1024)
-	flush := func() bool {
-		if len(batch) == 0 {
-			return true
-		}
-		if _, err := flow.conn.Write(batch); err != nil {
-			_ = flow.conn.Close()
-			return false
-		}
-		batch = batch[:0]
-		return true
+	if flow.outClosed || flow.finQueued {
+		return
 	}
-	for {
-		n := flow.kcp.Recv(message)
+	var batch []byte
+	for cap(flow.outq)-len(flow.outq) >= 2 {
+		n := flow.kcp.Recv(r.recvBuf)
 		if n < 0 {
-			flush()
-			return
+			break
 		}
 		if n == 0 {
 			continue
 		}
-		switch message[0] {
+		msg := r.recvBuf[:n]
+		switch msg[0] {
 		case 0:
-			payload := message[1:n]
-			if len(batch)+len(payload) > cap(batch) && !flush() {
-				return
+			if batch == nil {
+				batch = make([]byte, 0, tcpWriteBatch)
 			}
-			batch = append(batch, payload...)
+			if len(batch)+n-1 > cap(batch) {
+				flow.outq <- batch
+				batch = make([]byte, 0, tcpWriteBatch)
+			}
+			batch = append(batch, msg[1:]...)
 		case 1:
-			if !flush() {
-				return
+			if len(batch) > 0 {
+				flow.outq <- batch
 			}
-			_ = flow.conn.CloseWrite()
+			flow.outq <- nil
+			flow.finQueued = true
+			return
 		default:
-			flush()
-			_ = flow.conn.Close()
+			r.removeFlow(flow)
 			return
 		}
+	}
+	if len(batch) > 0 {
+		flow.outq <- batch
 	}
 }
 
@@ -384,8 +484,12 @@ func (r *tcpRelay) update(now time.Time) {
 			r.send(protocol.RelayFrame{Type: protocol.RelayTCPOpen, FlowID: id})
 			flow.lastOpen = now
 		}
-		flow.kcp.Update()
-		r.maybeReleaseReader(flow, tcpSendLowWater)
+		if !flow.opened {
+			continue
+		}
+		r.flushKCP(flow)
+		r.drain(flow)
+		r.maybeReleaseReader(flow, r.highWater()/2)
 	}
 }
 
@@ -403,12 +507,9 @@ func releaseTCPReader(flow *tcpFlow) {
 }
 
 func (r *tcpRelay) expire(now time.Time) {
-	for id, flow := range r.flows {
-		if now.Sub(flow.last) <= r.cfg.IdleTimeout {
-			continue
+	for _, flow := range r.flows {
+		if now.Sub(flow.last) > r.cfg.IdleTimeout {
+			r.removeFlow(flow)
 		}
-		releaseTCPReader(flow)
-		_ = flow.conn.Close()
-		delete(r.flows, id)
 	}
 }

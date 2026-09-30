@@ -35,11 +35,11 @@ func TestReliableRawQueueIsBoundedAndReset(t *testing.T) {
 	for i := 0; i < maxReliableCarrierQueue+10; i++ {
 		e.enqueueRaw([]byte{byte(i)}, Tuple{})
 	}
-	if len(e.rawQueue) != maxReliableCarrierQueue || e.stats.dropped != 10 {
-		t.Fatalf("queue=%d dropped=%d", len(e.rawQueue), e.stats.dropped)
+	if e.rawQueue.Len() != maxReliableCarrierQueue || e.stats.dropped != 10 {
+		t.Fatalf("queue=%d dropped=%d", e.rawQueue.Len(), e.stats.dropped)
 	}
 	e.resetRelays()
-	if len(e.rawQueue) != 0 {
+	if e.rawQueue.Len() != 0 {
 		t.Fatal("session reset retained reliable raw packets")
 	}
 }

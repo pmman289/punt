@@ -158,6 +158,9 @@ UDP carrier 复用真实 control socket 和 NAT mapping，但数据仍由 Punt s
     "listen_side": "client",
     "listen": "127.0.0.1:8080",
     "tcp_nocwnd": false,
+    "kcp_window": 512,
+    "kcp_interval": 10,
+    "kcp_fast_resend": 2,
     "idle_timeout": "5m"
   }
 }
@@ -230,7 +233,22 @@ UDP 的客户端地址/端口。不要把客户端本地端口或预期公网映
 | `-server-tx` | `icmp` | server -> client carrier，`icmp` 或 `udp` |
 | `-max-pps` | `10000` | 当前发送方向数据 carrier PPS 上限 |
 | `-max-mbps` | `100` | 当前发送方向数据 carrier 速率上限 |
+| `-burst` | `100ms` | 令牌桶容量对应的时间；长 RTT/突发链路可适当增大 |
+| `-queue-packets` | `4096` | 可靠 carrier 队列深度；应覆盖 KCP 窗口和短时突发 |
+| `-socket-buffer` | `4MiB` | UDP/raw socket 请求缓冲；受 Linux `rmem_max/wmem_max` 约束 |
 | `-icmp-pacing-pps` | `0` | WireGuard 经本机 ICMP 发送方向的可选节奏目标；`0` 保持直发 |
+
+TCP relay 还支持 `-kcp-window`（默认 `512` 段）、`-kcp-interval`（默认 `10ms`）
+和 `-kcp-fast-resend`（默认 `2`，`-1` 关闭）。JSON relay 中对应
+`kcp_window`、`kcp_interval`、`kcp_fast_resend`。窗口应按
+`带宽(bit/s) × RTT(s) / 8 / 1359` 估算后再测量；`tcp_nocwnd=true` 只适用于
+已知链路，并且必须同时设置保守的 `max_mbps`、`max_pps`。
+
+限速器对 TCP relay 可靠包执行排队整形；`limiter_queued` 表示等待令牌，
+`queue_drops` 表示队列真正溢出。UDP relay/WireGuard 等不可靠数据超速时会计入
+`limiter_drops`。应用 datagram 超过 relay 单包预算则单独计入 `relay_oversize`，
+不会与带宽丢包混淆。`tx_bytes`/`rx_bytes` 是包含 carrier 外层头的线上字节，
+可用于计算实际利用率。
 
 先从低速率开始。若运营商对 ICMP 限速或丢包，应下调应用发送速率并观察
 `dropped`、WireGuard transfer 和端到端丢包，不要仅提高速率上限。对于

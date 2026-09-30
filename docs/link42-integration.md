@@ -55,6 +55,9 @@ Punt 受管启动使用严格 JSON。未知字段会使启动失败，避免 Age
 | `max_payload` | 否 | 最大认证数据 payload，默认 `1400` |
 | `max_pps` | 否 | 数据载体 PPS 上限，默认 `10000` |
 | `max_mbps` | 否 | 数据载体速率上限，默认 `100` |
+| `burst` | 否 | 令牌桶容量时间，默认 `100ms` |
+| `queue_packets` | 否 | 可靠 carrier 队列深度，默认 `4096` |
+| `socket_buffer` | 否 | UDP/raw socket 请求缓冲，默认 `4194304` |
 | `icmp_pacing_pps` | 否 | 本机 ICMP WireGuard 发送方向的节奏目标；`0` 禁用，且不得高于 `max_pps` |
 
 `network` 不是“用户从公网访问的地址”。例如服务端位于 DNAT/EIP 后时，
@@ -64,7 +67,8 @@ DNAT/EIP 地址。Link42 必须分别保存和校验这两个地址，不能从 
 
 `relay` 内部字段为 `protocol`（`tcp` 或 `udp`）、`listen_side`（默认
 `client`）、listener side 的 `listen`、target side 的 `target`、可选
-`idle_timeout` 和 `tcp_nocwnd`。Link42 API 必须让连接两端共享
+`idle_timeout`、`tcp_nocwnd`、`kcp_window`、`kcp_interval` 和
+`kcp_fast_resend`。Link42 API 必须让连接两端共享
 protocol/listen_side/tcp_nocwnd，并按
 应用角色只下发 listen 或 target；target 不得来自运行时网络报文。通用 relay
 是另一种 Punt 使用方式，不改变下述 WireGuard middleware 的现有配置映射。
@@ -91,7 +95,8 @@ server_bind_ipv4, server_bind_udp_port
 client_bind_ipv4, client_bind_udp_port
 local_wrapper_port, peer_wrapper_port
 client_to_server_carrier, server_to_client_carrier
-keepalive, dead_timeout, tcp_fallback, max_payload, max_pps, max_mbps, icmp_pacing_pps
+keepalive, dead_timeout, tcp_fallback, max_payload, max_pps, max_mbps,
+burst, queue_packets, socket_buffer, icmp_pacing_pps
 generated_punt_key
 ```
 
@@ -136,7 +141,9 @@ punt status -socket /run/link42-punt/<instance>.sock
 
 返回 JSON 中的 `state`、`client_to_server`、`server_to_client`、
 `learned_remote`、`last_ack_at`、`raw_in/out`、`udp_data_in/out`、
-`wireguard_in/out`、`dropped` 和 `invalid` 应写入 Link42 运行状态。只有
+`wireguard_in/out`、`tx_bytes`、`rx_bytes`、`limiter_queued`、`limiter_drops`、
+`queue_drops`、`relay_oversize`、`dropped` 和 `invalid` 应写入 Link42 运行状态。
+只有
 `ESTABLISHED` 且 WireGuard 最新握手存在时，面板才能将连接标识为可用。
 通用 relay 还返回 `transport`、`listen_side`、`listen`、`target`、
 `active_flows`、`queued_raw`、`queued_udp` 与 `tcp_nocwnd`；这些字段

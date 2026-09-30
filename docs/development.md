@@ -75,6 +75,9 @@
   纳入该限速，因为它负责维持 NAT 状态。
 - 性能优化不能绕过 MAC、长度、tuple 或 session 校验。先保护边界，再减少
   分配和 syscall 开销。
+- 性能审计问题必须逐项记录在 [优化 checklist](optimization-checklist.md)，
+  不能只报告总体吞吐。限速排队、队列丢弃、超大 datagram 和线上字节必须分别
+  计数，便于区分链路丢包、应用 MTU 错误和本地整形行为。
 
 ## 变更流程
 

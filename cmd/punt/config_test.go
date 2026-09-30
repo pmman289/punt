@@ -80,6 +80,26 @@ func TestLoadManagedTCPFallbackConfig(t *testing.T) {
 	}
 }
 
+func TestLoadManagedPerformanceConfig(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "key")
+	if err := os.WriteFile(keyPath, []byte(managedTestKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "punt.json")
+	config := `{"mode":"server","network":"192.0.2.2:23086","key_file":"` + keyPath + `","burst":"250ms","queue_packets":8192,"socket_buffer":8388608,"relay":{"protocol":"tcp","target":"127.0.0.1:80","kcp_window":2048,"kcp_interval":20,"kcp_fast_resend":3}}`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadManagedConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Burst != 250*time.Millisecond || cfg.QueuePackets != 8192 || cfg.SocketBuffer != 8388608 || cfg.Relay == nil || cfg.Relay.KCPWindow != 2048 || cfg.Relay.KCPInterval != 20 || cfg.Relay.KCPFastResend != 3 {
+		t.Fatalf("performance config not loaded: %#v", cfg)
+	}
+}
+
 func TestLoadManagedCarrierConfig(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "key")

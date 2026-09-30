@@ -23,13 +23,16 @@ const (
 // selects which underlay role accepts local application traffic; the opposite
 // side connects only to Target.
 type RelayConfig struct {
-	Protocol    RelayProtocol
-	ListenSide  Mode
-	Listen      *net.UDPAddr
-	Target      *net.UDPAddr
-	IdleTimeout time.Duration
-	MaxPayload  int
-	TCPNoCwnd   bool
+	Protocol      RelayProtocol
+	ListenSide    Mode
+	Listen        *net.UDPAddr
+	Target        *net.UDPAddr
+	IdleTimeout   time.Duration
+	MaxPayload    int
+	TCPNoCwnd     bool
+	KCPWindow     int
+	KCPInterval   int
+	KCPFastResend int
 }
 
 type relayFlow struct {
@@ -55,6 +58,9 @@ func validateRelayConfig(mode Mode, cfg *RelayConfig) error {
 	}
 	if cfg.Protocol != RelayTCP && cfg.TCPNoCwnd {
 		return errors.New("tcp_nocwnd is valid only for TCP relay")
+	}
+	if cfg.KCPWindow < 0 || cfg.KCPWindow > 32768 || cfg.KCPInterval < 0 || cfg.KCPInterval > 5000 || cfg.KCPFastResend < -1 {
+		return errors.New("invalid KCP window, interval, or fast resend")
 	}
 	if cfg.ListenSide == "" {
 		cfg.ListenSide = Client
@@ -105,6 +111,7 @@ func startUDPRelay(ctx context.Context, mode Mode, cfg RelayConfig, events chan<
 	if err != nil {
 		return nil, err
 	}
+	tuneUDPBuffers(conn, defaultSocketBuffer)
 	r.listen = conn
 	go r.readClient(ctx)
 	return r, nil
@@ -128,55 +135,51 @@ func (r *udpRelay) reset() {
 	r.byAddr = make(map[string]uint32)
 }
 
-func (r *udpRelay) readClient(ctx context.Context) {
+func (r *udpRelay) readDatagrams(ctx context.Context, conn *net.UDPConn, mk func([]byte, *net.UDPAddr, *[]byte) event) {
+	limit := relayPayloadLimit(r.cfg)
 	for {
-		buf := make([]byte, relayPayloadLimit(r.cfg))
-		n, _, flags, addr, err := r.listen.ReadMsgUDP(buf, nil)
+		bp := rxPool.Get().(*[]byte)
+		n, _, flags, addr, err := conn.ReadMsgUDP(*bp, nil)
 		if err != nil {
+			rxPool.Put(bp)
 			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 				return
 			}
 			continue
 		}
-		if flags&syscall.MSG_TRUNC != 0 {
+		if n > len(*bp) {
+			n = len(*bp)
+		}
+		ev := mk((*bp)[:n], addr, bp)
+		if flags&syscall.MSG_TRUNC != 0 || n > limit {
 			select {
-			case r.events <- event{type_: relayDropEvent}:
+			case r.events <- event{type_: relayOversizeEvent}:
 			case <-ctx.Done():
+				rxPool.Put(bp)
 				return
 			}
+			rxPool.Put(bp)
 			continue
 		}
-		payload := append([]byte(nil), buf[:n]...)
 		select {
-		case r.events <- event{type_: relayClientEvent, data: payload, addr: addr}:
+		case r.events <- ev:
 		case <-ctx.Done():
+			rxPool.Put(bp)
 			return
 		}
 	}
 }
 
+func (r *udpRelay) readClient(ctx context.Context) {
+	r.readDatagrams(ctx, r.listen, func(data []byte, addr *net.UDPAddr, bp *[]byte) event {
+		return event{type_: relayClientEvent, data: data, addr: addr, rx: bp}
+	})
+}
+
 func (r *udpRelay) readTarget(ctx context.Context, id uint32, conn *net.UDPConn) {
-	for {
-		buf := make([]byte, relayPayloadLimit(r.cfg))
-		n, _, flags, _, err := conn.ReadMsgUDP(buf, nil)
-		if err != nil {
-			return
-		}
-		if flags&syscall.MSG_TRUNC != 0 {
-			select {
-			case r.events <- event{type_: relayDropEvent}:
-			case <-ctx.Done():
-				return
-			}
-			continue
-		}
-		payload := append([]byte(nil), buf[:n]...)
-		select {
-		case r.events <- event{type_: relayTargetEvent, flowID: id, data: payload}:
-		case <-ctx.Done():
-			return
-		}
-	}
+	r.readDatagrams(ctx, conn, func(data []byte, _ *net.UDPAddr, bp *[]byte) event {
+		return event{type_: relayTargetEvent, flowID: id, data: data, rx: bp}
+	})
 }
 
 func (r *udpRelay) listenerFrame(payload []byte, sender *net.UDPAddr, now time.Time) (protocol.RelayFrame, error) {
@@ -218,6 +221,7 @@ func (r *udpRelay) handleRemote(ctx context.Context, frame protocol.RelayFrame, 
 		if err != nil {
 			return err
 		}
+		tuneUDPBuffers(conn, defaultSocketBuffer)
 		flow = &relayFlow{target: conn}
 		r.flows[frame.FlowID] = flow
 		go r.readTarget(ctx, frame.FlowID, conn)

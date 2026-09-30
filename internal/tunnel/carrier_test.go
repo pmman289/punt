@@ -59,8 +59,8 @@ func TestWireGuardICMPPacingIsDirectionalAndBounded(t *testing.T) {
 	for i := 0; i < maxPacedWireGuardQueue+1; i++ {
 		e.enqueueRaw([]byte{byte(i)}, Tuple{})
 	}
-	if len(e.rawQueue) != maxPacedWireGuardQueue || e.stats.dropped != 1 {
-		t.Fatalf("paced queue=%d dropped=%d", len(e.rawQueue), e.stats.dropped)
+	if e.rawQueue.Len() != maxPacedWireGuardQueue || e.stats.dropped != 1 {
+		t.Fatalf("paced queue=%d dropped=%d", e.rawQueue.Len(), e.stats.dropped)
 	}
 
 	udp := &engine{cfg: Config{Mode: Server, ServerTX: CarrierUDP, MaxPPS: 10_000, ICMPPacingPPS: 8_000}}
@@ -155,12 +155,12 @@ func TestReliableUDPQueueIsBoundedAndFlushes(t *testing.T) {
 	e.limiter.bytes = 0
 	e.limiter.last = now
 	e.sendDataWithQueue(protocol.Packet, []byte("queued"), true)
-	if len(e.udpQueue) != 1 || e.stats.udpDataOut != 0 {
-		t.Fatalf("UDP queue was not used: queue=%d stats=%#v", len(e.udpQueue), e.stats)
+	if e.udpQueue.Len() != 1 || e.stats.udpDataOut != 0 {
+		t.Fatalf("UDP queue was not used: queue=%d stats=%#v", e.udpQueue.Len(), e.stats)
 	}
 	e.flushUDPQueue(now.Add(2 * time.Second))
-	if len(e.udpQueue) != 0 || e.stats.udpDataOut != 1 {
-		t.Fatalf("UDP queue was not flushed: queue=%d stats=%#v", len(e.udpQueue), e.stats)
+	if e.udpQueue.Len() != 0 || e.stats.udpDataOut != 1 {
+		t.Fatalf("UDP queue was not flushed: queue=%d stats=%#v", e.udpQueue.Len(), e.stats)
 	}
 	_ = receiver.SetReadDeadline(time.Now().Add(time.Second))
 	buf := make([]byte, 256)
@@ -176,11 +176,11 @@ func TestReliableUDPQueueIsBoundedAndFlushes(t *testing.T) {
 	for i := 0; i < maxReliableCarrierQueue+10; i++ {
 		e.enqueueUDP([]byte{byte(i)}, e.remote)
 	}
-	if len(e.udpQueue) != maxReliableCarrierQueue || e.stats.dropped != 10 {
-		t.Fatalf("bounded queue=%d dropped=%d", len(e.udpQueue), e.stats.dropped)
+	if e.udpQueue.Len() != maxReliableCarrierQueue || e.stats.dropped != 10 {
+		t.Fatalf("bounded queue=%d dropped=%d", e.udpQueue.Len(), e.stats.dropped)
 	}
 	e.resetRelays()
-	if len(e.udpQueue) != 0 {
+	if e.udpQueue.Len() != 0 {
 		t.Fatal("session reset retained reliable UDP packets")
 	}
 }
